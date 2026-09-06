@@ -1,6 +1,5 @@
 import Item, { ItemTask } from "./Item";
 import MiniSearch, { SearchResult } from "minisearch";
-import request from "request";
 import TarkovMarketItem from "./TarkovMarketItem";
 import { Form } from "react-router-dom/dist";
 import fs from "fs";
@@ -26,17 +25,18 @@ export default class Items {
       if (tarkovMarketApiKey.trim() !== "") {
         console.log("Using Tarkov Market API key for item fetch");
 
-        const res = await fetch(
-          "https://api.tarkov-market.app/api/v1/items/all",
-          {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json",
-              "x-api-key": tarkovMarketApiKey,
-            },
-          }
-        );
+        const tarkovMarketUrl = usePveMode
+          ? "https://api.tarkov-market.app/api/v1/pve/items/all"
+          : "https://api.tarkov-market.app/api/v1/items/all";
+
+        const res = await fetch(tarkovMarketUrl, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "x-api-key": tarkovMarketApiKey,
+          },
+        });
 
         if (!(res.status == 200 || res.status == 204)) {
           throw new Error("Failed to fetch items");
@@ -66,23 +66,22 @@ export default class Items {
 
         this.items = formattedData;
       } else {
-        console.log("No API key provided, fetching items from Tarkov.dev API");
+        console.log("No API key provided, fetching items from Tarkov.dev JSON API");
         const itemsFromApi = await this.getItemsPromise(usePveMode);
         console.log(itemsFromApi.length + " items fetched from API");
         this.items = itemsFromApi;
       }
     } catch (error) {
-      console.error("Failed to fetch items from Tarkov Market API:", error);
+      console.error("Failed to fetch items:", error);
 
-      // If Tarkov Market API fails and we have an API key, don't fall back
-      // If we don't have an API key, we already tried Tarkov.dev above
+      // If we don't have an API key, Tarkov.dev was already attempted above.
       if (tarkovMarketApiKey.trim() === "") {
         throw new Error("Failed to fetch items from API");
       }
 
-      // Try Tarkov.dev as fallback when API key fails
+      // Try Tarkov.dev as fallback when Tarkov Market API fails.
       try {
-        console.log("Falling back to Tarkov.dev API");
+        console.log("Falling back to Tarkov.dev JSON API");
         const itemsFromApi = await this.getItemsPromise(usePveMode);
         console.log(itemsFromApi.length + " items fetched from API");
         this.items = itemsFromApi;
@@ -96,106 +95,135 @@ export default class Items {
     }
   }
 
-  getItemsPromise(usePveMode?: boolean): Promise<Item[]> {
-    const options = {
-      method: "POST",
-      url: "https://api.tarkov.dev/graphql",
-      headers: {
-        "sec-ch-ua":
-          '" Not;A Brand";v="99", "Google Chrome";v="97", "Chromium";v="97"',
-        accept: "application/json",
-        dnt: "1",
-        "content-type": "application/json",
-        "sec-ch-ua-mobile": "?0",
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-dest": "empty",
-        "accept-language": "en-US,en;q=0.9",
-      },
-      body: JSON.stringify({
-        query: `
-          {
-            items(type:any${usePveMode ? ", gameMode: pve" : ""}){
-                id
-                name
-                shortName
-                width
-                height
-                avg24hPrice
-                lastLowPrice
-                iconLink
-                sellFor {
-                  vendor {
-                    name
-                  }
-                  price
-                  currency
-                }
-            }
-        }
-          `,
+  async getItemsPromise(usePveMode?: boolean): Promise<Item[]> {
+    const gameMode = usePveMode ? "pve" : "regular";
+    const baseUrl = `https://json.tarkov.dev/${gameMode}`;
+
+    const [itemsResponse, translationsResponse] = await Promise.all([
+      fetch(`${baseUrl}/items`, {
+        headers: { Accept: "application/json" },
       }),
+      fetch(`${baseUrl}/items_en`, {
+        headers: { Accept: "application/json" },
+      }),
+    ]);
+
+    if (!itemsResponse.ok) {
+      throw new Error(
+        `Tarkov.dev items request failed with status ${itemsResponse.status}`
+      );
+    }
+
+    if (!translationsResponse.ok) {
+      throw new Error(
+        `Tarkov.dev translations request failed with status ${translationsResponse.status}`
+      );
+    }
+
+    const itemsPayload: any = await itemsResponse.json();
+    const translationsPayload: any = await translationsResponse.json();
+
+    if (!itemsPayload?.data?.items) {
+      throw new Error("Unexpected Tarkov.dev items response");
+    }
+
+    const itemTranslations = translationsPayload?.data || {};
+    const translate = (value: any, translations: any): string => {
+      if (typeof value !== "string") {
+        return "";
+      }
+
+      const translated = translations[value];
+      return typeof translated === "string" ? translated : value;
     };
 
-    return new Promise((resolve, reject) => {
-      request(options, function (error, response) {
-        if (error) {
-          reject(error);
-        } else {
-          const itemData = JSON.parse(response.body).data.items;
-          const formattedData: Item[] = itemData.map((item: any) => {
-            return {
-              id: item.id,
-              name: item.name,
-              shortName: item.shortName,
-              availableOnFleaMarket:
-                item?.sellFor?.filter(
-                  (x: { vendor: { name: string } }) =>
-                    x.vendor.name === "Flea Market"
-                )?.length > 0,
-              prices: {
-                latest: item.avg24hPrice,
-                avgDay: item.avg24hPrice,
-                trader:
-                  item.sellFor && Array.isArray(item.sellFor)
-                    ? item.sellFor
-                        .filter(
-                          (x: { vendor: { name: string } }) =>
-                            x.vendor.name !== "Flea Market"
-                        )
-                        .map(
-                          (x: { price: number; vendor: { name: string } }) => {
-                            return {
-                              name: x.vendor.name,
-                              price: x.price,
-                            };
-                          }
-                        )
-                        .sort(
-                          (a: { price: number }, b: { price: number }) =>
-                            b.price - a.price
-                        )[0]
-                    : {
-                        name: "N/A",
-                        price: 0,
-                      },
-              },
-              slots: item.width * item.height,
-              tasks: [] as ItemTask[],
-              icon: item.iconLink,
-            };
-          });
-          console.log(formattedData[0]);
-          console.log(formattedData.length + " items loaded");
-          // console.log(JSON.stringify(itemData[0]));
-          // console.log(JSON.stringify(formattedData[0]));
-          resolve(formattedData);
-        }
-      });
+    // Trader names are kept in a separate static endpoint. Failure to load
+    // them should not prevent item prices from working.
+    const traderNames: { [id: string]: string } = {};
+    try {
+      const [tradersResponse, traderTranslationsResponse] = await Promise.all([
+        fetch(`${baseUrl}/traders`, {
+          headers: { Accept: "application/json" },
+        }),
+        fetch(`${baseUrl}/traders_en`, {
+          headers: { Accept: "application/json" },
+        }),
+      ]);
+
+      if (tradersResponse.ok && traderTranslationsResponse.ok) {
+        const tradersPayload: any = await tradersResponse.json();
+        const traderTranslationsPayload: any =
+          await traderTranslationsResponse.json();
+        const traderTranslations = traderTranslationsPayload?.data || {};
+        const traders = tradersPayload?.data || {};
+
+        Object.keys(traders).forEach((traderId) => {
+          traderNames[traderId] = translate(
+            traders[traderId]?.name,
+            traderTranslations
+          );
+        });
+      }
+    } catch (error) {
+      console.warn("Failed to load Tarkov.dev trader names:", error);
+    }
+
+    const itemMap = itemsPayload.data.items;
+    const itemData: any[] = Array.isArray(itemMap)
+      ? itemMap
+      : Object.keys(itemMap).map((id) => itemMap[id]);
+
+    const formattedData: Item[] = itemData.map((item: any) => {
+      const lastLowPrice =
+        typeof item.lastLowPrice === "number" ? item.lastLowPrice : 0;
+      const avg24hPrice =
+        typeof item.avg24hPrice === "number" ? item.avg24hPrice : 0;
+      const types = Array.isArray(item.types) ? item.types : [];
+      const traderPrices = Array.isArray(item.sellToTrader)
+        ? item.sellToTrader
+        : [];
+
+      const trader = traderPrices
+        .map((price: any) => {
+          return {
+            name: traderNames[price.trader] || "Trader",
+            price:
+              typeof price.priceRUB === "number"
+                ? price.priceRUB
+                : typeof price.price === "number"
+                  ? price.price
+                  : 0,
+          };
+        })
+        .sort(
+          (a: { price: number }, b: { price: number }) => b.price - a.price
+        )[0] || {
+        name: "N/A",
+        price: 0,
+      };
+
+      return {
+        id: item.id,
+        name: translate(item.name, itemTranslations),
+        shortName: translate(item.shortName, itemTranslations),
+        availableOnFleaMarket:
+          !types.includes("noFlea") &&
+          (lastLowPrice > 0 || avg24hPrice > 0),
+        prices: {
+          latest: lastLowPrice || avg24hPrice,
+          avgDay: avg24hPrice || lastLowPrice,
+          avgWeek: avg24hPrice || lastLowPrice,
+          trader,
+        },
+        slots: (item.width || 1) * (item.height || 1),
+        tasks: [] as ItemTask[],
+        icon: item.iconLink || "",
+      };
     });
+
+    console.log(formattedData[0]);
+    console.log(formattedData.length + " items loaded");
+    return formattedData;
   }
 
   initializeSearchIndex(): void {
