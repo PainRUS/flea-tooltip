@@ -3,6 +3,7 @@ import { Tooltip } from "../pages/Tooltip";
 import UiTranslator from "../components/UiTranslator";
 import TooltipPriceColors from "../components/TooltipPriceColors";
 import QuestTooltipVisibility from "../components/QuestTooltipVisibility";
+import TooltipFleaLevel from "../components/TooltipFleaLevel";
 import "../styles/index.css";
 import React from "react";
 
@@ -65,6 +66,7 @@ root.render(
     <UiTranslator />
     <TooltipPriceColors />
     <QuestTooltipVisibility />
+    <TooltipFleaLevel />
     <TooltipCardLayer />
   </>
 );
