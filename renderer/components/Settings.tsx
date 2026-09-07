@@ -132,24 +132,29 @@ export default function Settings({
   const [localUsePveMode, setLocalUsePveMode] = useState(usePveMode);
   const [localShowTotalPrice, setLocalShowTotalPrice] = useState(showTotalPrice);
   const [localLanguage, setLocalLanguage] = useState<AppLanguage>("en");
+  const [localOcrDebugMode, setLocalOcrDebugMode] = useState(false);
+  const [localOcrDebugStepDelay, setLocalOcrDebugStepDelay] = useState(800);
   const [isValidatingApiKey, setIsValidatingApiKey] = useState(false);
   const [apiKeyValidationMessage, setApiKeyValidationMessage] = useState("");
   const [languageMessage, setLanguageMessage] = useState("");
+  const [debugMessage, setDebugMessage] = useState("");
   const [showHelp, setShowHelp] = useState(false);
 
   const ru = localLanguage === "ru";
   const t = (en: string, russian: string) => (ru ? russian : en);
 
   useEffect(() => {
-    const loadLanguage = async () => {
+    const loadExtendedSettings = async () => {
       try {
         const config = await window.electron.getUserConfig();
         setLocalLanguage(config.language ?? "en");
+        setLocalOcrDebugMode(config.ocrDebugMode ?? false);
+        setLocalOcrDebugStepDelay(config.ocrDebugStepDelay ?? 800);
       } catch (error) {
-        console.error("Failed to load language setting:", error);
+        console.error("Failed to load extended settings:", error);
       }
     };
-    loadLanguage();
+    loadExtendedSettings();
   }, []);
 
   useEffect(() => setLocalSoundEnabled(soundEnabled), [soundEnabled]);
@@ -221,6 +226,41 @@ export default function Settings({
           ? "Не удалось сохранить язык."
           : "Failed to save language."
       );
+    }
+  };
+
+  const handleOcrDebugToggle = async (enabled: boolean) => {
+    setLocalOcrDebugMode(enabled);
+    try {
+      await updateConfig((config) => {
+        config.ocrDebugMode = enabled;
+      });
+      setDebugMessage(
+        t(
+          "Debug setting saved. Restart the application to apply it.",
+          "Настройка отладки сохранена. Перезапустите приложение, чтобы применить её."
+        )
+      );
+    } catch (error) {
+      console.error("Failed to save OCR debug setting:", error);
+    }
+  };
+
+  const handleOcrDebugDelayChange = async (delay: number) => {
+    const clamped = Math.max(100, Math.min(2000, delay));
+    setLocalOcrDebugStepDelay(clamped);
+    try {
+      await updateConfig((config) => {
+        config.ocrDebugStepDelay = clamped;
+      });
+      setDebugMessage(
+        t(
+          "Debug delay saved. Restart the application to apply it.",
+          "Задержка отладки сохранена. Перезапустите приложение, чтобы применить её."
+        )
+      );
+    } catch (error) {
+      console.error("Failed to save OCR debug delay:", error);
     }
   };
 
@@ -316,12 +356,17 @@ export default function Settings({
           )
         );
       } else {
-        setApiKeyValidationMessage(t("✗ Invalid API key", "✗ Неверный API-ключ"));
+        setApiKeyValidationMessage(
+          t("✗ Invalid API key", "✗ Неверный API-ключ")
+        );
       }
     } catch (error) {
       console.error("API key validation failed:", error);
       setApiKeyValidationMessage(
-        t("✗ Validation failed - please try again", "✗ Ошибка проверки — попробуйте ещё раз")
+        t(
+          "✗ Validation failed - please try again",
+          "✗ Ошибка проверки — попробуйте ещё раз"
+        )
       );
     } finally {
       setIsValidatingApiKey(false);
@@ -508,6 +553,50 @@ export default function Settings({
               </select>
               {languageMessage && (
                 <p className="text-xs text-amber-300">{languageMessage}</p>
+              )}
+            </div>
+
+            <div className="space-y-3 border-b border-stone-700 pb-4">
+              <SettingToggle
+                label="OCR Debug Mode"
+                description={t(
+                  "Slowly visualizes each tooltip-detection step on screen. Requires restart.",
+                  "Медленно показывает на экране каждый этап поиска игровой плашки. Требуется перезапуск."
+                )}
+                id="ocr-debug-toggle"
+                enabled={localOcrDebugMode}
+                onToggle={() => handleOcrDebugToggle(!localOcrDebugMode)}
+              />
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium">
+                    Debug step delay
+                  </label>
+                  <span className="text-sm text-stone-400">
+                    {localOcrDebugStepDelay} ms
+                  </span>
+                </div>
+                <p className="text-xs text-stone-400 mb-1">
+                  {t(
+                    "Delay between visual debug steps (100-2000 ms).",
+                    "Задержка между визуальными этапами отладки (100–2000 мс)."
+                  )}
+                </p>
+                <input
+                  type="range"
+                  min="100"
+                  max="2000"
+                  step="100"
+                  value={localOcrDebugStepDelay}
+                  disabled={!localOcrDebugMode}
+                  onChange={(event) =>
+                    handleOcrDebugDelayChange(parseInt(event.target.value))
+                  }
+                  className="w-full h-2 bg-stone-700 rounded-lg appearance-none cursor-pointer accent-green-500 disabled:opacity-50"
+                />
+              </div>
+              {debugMessage && (
+                <p className="text-xs text-amber-300">{debugMessage}</p>
               )}
             </div>
 
