@@ -55,6 +55,8 @@ function createUserConfigFile(userDataPath: string): void {
     usePveMode: false,
     showTotalPrice: false,
     language: "en",
+    ocrDebugMode: false,
+    ocrDebugStepDelay: 800,
   };
 
   fs.writeFileSync(
