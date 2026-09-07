@@ -4,18 +4,20 @@ import TooltipWindow from "./TooltipWindow";
 import Items from "./Items";
 import IpcConstants from "./IpcConstants";
 import path from "path";
+import fs from "fs";
 import { isDev } from "../utils";
 import koffi from "koffi";
 import log from "electron-log";
 import Item from "./Item";
 import { getUserConfigData } from "../main/services/config";
+import { AppLanguage } from "./UserConfig";
 
 export default class OCRProcess {
   constructor(items: Items, priceListWindow: BrowserWindow) {
     this.priceListWindow = priceListWindow;
     this.items = items;
     this.itemNamesLowerCaseList = this.items.items.map((item) =>
-      item.name.toLowerCase()
+      item.searchName.toLowerCase()
     );
   }
 
@@ -25,6 +27,7 @@ export default class OCRProcess {
   protected itemNamesLowerCaseList: string[] = [];
   protected user32: koffi.IKoffiLib;
   protected Point: koffi.IKoffiCType;
+  protected language: AppLanguage = "en";
 
   public setPriceListWindow(priceListWindow: BrowserWindow): void {
     this.priceListWindow = priceListWindow;
@@ -35,7 +38,6 @@ export default class OCRProcess {
       "int __stdcall GetCursorPos(_Out_ POINT *pos)"
     );
 
-    // Get and show cursor position
     const pos = {};
     try {
       if (!GetCursorPos(pos)) throw new Error("Failed to get cursor position");
@@ -51,7 +53,6 @@ export default class OCRProcess {
     physicalX: number,
     physicalY: number
   ): { x: number; y: number } {
-    // Get the display containing the cursor
     const display = screen.getDisplayNearestPoint({
       x: physicalX,
       y: physicalY,
@@ -71,33 +72,55 @@ export default class OCRProcess {
       y: "long",
     });
 
-    // Get RGB border color values from config
     const userConfig = getUserConfigData();
     const redValue = userConfig.borderColorRed ?? 82;
     const greenValue = userConfig.borderColorGreen ?? 89;
     const blueValue = userConfig.borderColorBlue ?? 90;
+    this.language = userConfig.language ?? "en";
+
+    const tesseractLanguage = this.language === "ru" ? "rus" : "eng";
+    const ocrDir = isDev()
+      ? path.join(app.getAppPath(), "lib", "ocr")
+      : path.join(process.resourcesPath, "ocr");
+    const ocrExecutable = path.join(ocrDir, "ocr_cpp.exe");
+    const trainedDataPath = path.join(
+      ocrDir,
+      `${tesseractLanguage}.traineddata`
+    );
+
+    if (!fs.existsSync(trainedDataPath)) {
+      const message = `Missing OCR language data: ${trainedDataPath}`;
+      isDev() ? console.error(message) : log.error(message);
+      return;
+    }
 
     isDev()
       ? console.log(
           "Initializing OCR process with values:",
           redValue,
           greenValue,
-          blueValue
+          blueValue,
+          "language:",
+          tesseractLanguage
         )
-      : log.info("Initializing OCR process");
+      : log.info(`Initializing OCR process (${tesseractLanguage})`);
 
-    // const ocrProcess = ;
-    const ocrProcess = isDev()
-      ? spawn(path.join(app.getAppPath(), "/lib/ocr/ocr_cpp.exe"), [
-          redValue.toString(),
-          greenValue.toString(),
-          blueValue.toString(),
-        ])
-      : spawn(path.join(process.resourcesPath, "/ocr/ocr_cpp.exe"), [
-          redValue.toString(),
-          greenValue.toString(),
-          blueValue.toString(),
-        ]);
+    const ocrProcess = spawn(
+      ocrExecutable,
+      [
+        redValue.toString(),
+        greenValue.toString(),
+        blueValue.toString(),
+        tesseractLanguage,
+      ],
+      {
+        cwd: ocrDir,
+        env: {
+          ...process.env,
+          TESSDATA_PREFIX: ocrDir,
+        },
+      }
+    );
 
     ocrProcess.stdout.setEncoding("utf-8");
     ocrProcess.stdout.on("data", this.onNewData.bind(this));
@@ -114,7 +137,6 @@ export default class OCRProcess {
     isDev()
       ? console.log("Successfully initialized OCR process")
       : log.info("Successfully initialized OCR process");
-    return;
   }
 
   onNewData(data: any): void {
@@ -139,10 +161,18 @@ export default class OCRProcess {
           }, 30);
         }
       } else if (incomingData.includes("||")) {
-        // eslint-disable-next-line no-control-regex
-        const incomingDataCleanedUp = incomingData.replace(/[^\x00-\x7F]/g, "");
+        // English OCR historically strips non-ASCII noise. Russian OCR must
+        // preserve UTF-8 Cyrillic output.
+        const incomingDataCleanedUp =
+          this.language === "ru"
+            ? incomingData
+            : incomingData.replace(/[^\x00-\x7F]/g, "");
         let itemName = incomingDataCleanedUp.split("||")[0];
         const coords = incomingDataCleanedUp.split("||")[1];
+        if (!coords || !coords.includes(",")) {
+          return;
+        }
+
         const x = parseInt(coords.split(",")[0]);
         const y = parseInt(coords.split(",")[1]);
         let item: Item | null = null;
@@ -154,25 +184,30 @@ export default class OCRProcess {
         ) {
           if (this.itemNamesLowerCaseList.includes(itemName.toLowerCase())) {
             item = this.items.items.find(
-              (x) => x.name.toLowerCase() === itemName.toLowerCase()
+              (candidate) =>
+                candidate.searchName.toLowerCase() === itemName.toLowerCase()
             );
           } else {
-            if (itemName.includes("WD-40 (1")) {
-              itemName = "WD-40 (100ml)";
-            } else if (itemName.includes("WD-40 (4")) {
-              itemName = "WD-40 (400ml)";
-            }
+            // These OCR corrections are English-specific and are intentionally
+            // disabled when Russian scanning is selected.
+            if (this.language === "en") {
+              if (itemName.includes("WD-40 (1")) {
+                itemName = "WD-40 (100ml)";
+              } else if (itemName.includes("WD-40 (4")) {
+                itemName = "WD-40 (400ml)";
+              }
 
-            if (itemName.toLowerCase().includes("kektape")) {
-              itemName = "kektape";
-            }
+              if (itemName.toLowerCase().includes("kektape")) {
+                itemName = "kektape";
+              }
 
-            if (itemName.toLowerCase().includes("pc cpi")) {
-              itemName = "pc cpu";
-            }
+              if (itemName.toLowerCase().includes("pc cpi")) {
+                itemName = "pc cpu";
+              }
 
-            if (itemName.toLowerCase().includes("mule")) {
-              itemName = "M.U.L.E stimulant injector";
+              if (itemName.toLowerCase().includes("mule")) {
+                itemName = "M.U.L.E stimulant injector";
+              }
             }
 
             const allowedLowerScoreItems = [
@@ -191,9 +226,10 @@ export default class OCRProcess {
               const userConfig = getUserConfigData();
               item = this.items.search(
                 itemName,
-                allowedLowerScoreItems.filter((i) =>
-                  itemName.toLowerCase().includes(i)
-                ).length > 0
+                this.language === "en" &&
+                  allowedLowerScoreItems.some((value) =>
+                    itemName.toLowerCase().includes(value)
+                  )
                   ? 12
                   : userConfig.lowestAcceptableScore ?? 50
               );
@@ -203,7 +239,9 @@ export default class OCRProcess {
 
         if (item && item.name !== "T H I C C item case") {
           const mousePos = this.getMousePos();
-          const electronMousePos = screen.getCursorScreenPoint();
+          if (!mousePos) {
+            return;
+          }
 
           if (
             mousePos.x < 2560 / 2 + 10 &&
@@ -231,7 +269,6 @@ export default class OCRProcess {
                 item
               );
               setTimeout(() => {
-                // Convert physical pixel coordinates to logical coordinates for proper 4K/high-DPI support
                 const logicalPos = this.getLogicalPosition(
                   mousePos.x,
                   mousePos.y
