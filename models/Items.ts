@@ -200,6 +200,13 @@ export default class Items {
     }
   }
 
+  private getFleaMarketMinLevel(source: any): number | undefined {
+    const value = source?.minLevelForFlea;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.round(value)
+      : undefined;
+  }
+
   private async refreshPricesOnly(
     apiKey: string | undefined,
     usePveMode: boolean,
@@ -241,6 +248,10 @@ export default class Items {
           const avg24hPrice = source.avg24hPrice || 0;
           item.availableOnFleaMarket =
             !source.bannedOnFlea && avg24hPrice > 0;
+          const sourceMinLevel = this.getFleaMarketMinLevel(source);
+          if (sourceMinLevel !== undefined) {
+            item.fleaMarketMinLevel = sourceMinLevel;
+          }
           item.prices.latest = avg24hPrice;
           item.prices.avgDay = avg24hPrice;
           item.prices.avgWeek = avg24hPrice;
@@ -304,6 +315,7 @@ export default class Items {
 
           item.availableOnFleaMarket =
             !types.includes("noFlea") && avg24hPrice > 0;
+          item.fleaMarketMinLevel = this.getFleaMarketMinLevel(source);
           item.prices.latest = avg24hPrice;
           item.prices.avgDay = avg24hPrice;
           item.prices.avgWeek = avg24hPrice;
@@ -433,6 +445,7 @@ export default class Items {
           searchShortName: item.shortName,
           availableOnFleaMarket:
             !item.bannedOnFlea && (item.avg24hPrice || 0) > 0,
+          fleaMarketMinLevel: this.getFleaMarketMinLevel(item),
           slots: item.slots,
           prices: {
             // avg24hPrice is the single authoritative flea value.
@@ -654,6 +667,7 @@ export default class Items {
         searchShortName: selectedShortName,
         availableOnFleaMarket:
           !types.includes("noFlea") && avg24hPrice > 0,
+        fleaMarketMinLevel: this.getFleaMarketMinLevel(item),
         prices: {
           // avg24hPrice is intentionally used for every flea field so legacy
           // renderers cannot accidentally fall back to lastLowPrice.
