@@ -1,6 +1,14 @@
 // import React from 'react';
 import PriceList from "../components/PriceList";
+import PriceUpdateStatus from "../components/PriceUpdateStatus";
 
 export function Home() {
-  return <PriceList />;
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <PriceUpdateStatus />
+      <div className="flex-1 min-h-0">
+        <PriceList />
+      </div>
+    </div>
+  );
 }
