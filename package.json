@@ -11,7 +11,7 @@
     "make": "electron-forge make",
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx .",
-    "test:search": "node --test -r ts-node/register/transpile-only tests/items-search.test.cjs",
+    "test:search": "node --test -r ts-node/register/transpile-only tests/*.test.cjs",
     "setup:ru-ocr": "node scripts/setup-russian-ocr.js"
   },
   "keywords": [],
