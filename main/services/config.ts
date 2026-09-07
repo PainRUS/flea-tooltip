@@ -57,6 +57,9 @@ function createUserConfigFile(userDataPath: string): void {
     language: "en",
     ocrDebugMode: false,
     ocrDebugStepDelay: 800,
+    lastPriceUpdateAt: null,
+    nextPriceUpdateAt: null,
+    priceUpdateFailed: false,
   };
 
   fs.writeFileSync(
