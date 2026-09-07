@@ -328,32 +328,36 @@ int main(int argc, char* argv[])
 		}
 	}
 
+	// Optional OCR language argument. Only explicitly supported languages are
+	// accepted so the scanner never guesses the game language.
+	std::string ocrLanguage = "eng";
+	if (argc >= 5) {
+		std::string requestedLanguage = argv[4];
+		if (requestedLanguage == "rus" || requestedLanguage == "eng") {
+			ocrLanguage = requestedLanguage;
+		}
+	}
+
 	short CURSOR_TOOLTIP_OFFSET_X{};
 	short CURSOR_TOOLTIP_OFFSET_Y{};
 
 	WCHAR exe_path[MAX_PATH];
 	GetModuleFileNameW(NULL, exe_path, MAX_PATH);
 
-	// 2. Extract the directory path
 	std::wstring ws_exe_path(exe_path);
 	std::wstring exe_dir = ws_exe_path.substr(0, ws_exe_path.find_last_of(L"\\/"));
 
 	std::ifstream file(exe_dir + L"\\scanningConfig.json");
 
-	// Check if the file opened successfully
 	if (!file.is_open()) {
 		cout << "IGNORE||NO CONFIG FILE FOUND" << endl;
 		CURSOR_TOOLTIP_OFFSET_X = 13;
 		CURSOR_TOOLTIP_OFFSET_Y = -13;
-		//return 0;
 	}
 	else
 	{
 		cout << "IGNORE||CONFIG FILE FOUND" << endl;
-		// Parse the JSON data directly from the input stream
 		json data = json::parse(file);
-
-		// Close the file (optional, as the ifstream destructor does this automatically)
 		file.close();
 
 		CURSOR_TOOLTIP_OFFSET_X = data["offsetX"];
@@ -369,18 +373,22 @@ int main(int argc, char* argv[])
 	}
 
 	tesseract::TessBaseAPI tess;
-	if (tess.Init(NULL, "eng") != 0) {
-		// Init failed
+	if (tess.Init(NULL, ocrLanguage.c_str()) != 0) {
+		cerr << "Failed to initialize Tesseract language: " << ocrLanguage << endl;
 		tess.End();
 		ReleaseDC(cachedDesktopWindow, cachedDesktopDC);
 		exit(1);
 	}
 
 	// Optimize Tesseract settings for speed (optimization #3)
-	tess.SetPageSegMode(tesseract::PSM_SINGLE_BLOCK); // Faster than default
-	tess.SetVariable("tessedit_char_whitelist", "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,$€₽@- "); // Common characters
-	tess.SetVariable("classify_bln_numeric_mode", "1"); // Enable numeric mode for faster processing
-	// Track last scanned cursor position - only scan once per position
+	tess.SetPageSegMode(tesseract::PSM_SINGLE_BLOCK);
+	if (ocrLanguage == "eng") {
+		// Keep the original restrictive whitelist for English. Russian mode must
+		// preserve Cyrillic characters, so it intentionally does not use it.
+		tess.SetVariable("tessedit_char_whitelist", "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,$€₽@- ");
+	}
+	tess.SetVariable("classify_bln_numeric_mode", "1");
+
 	static POINT lastScannedCursor = {0, 0};
 
 	string scanText{};
@@ -397,7 +405,6 @@ int main(int argc, char* argv[])
 	short offsetY = 0;
 	POINT bottomRightBorderPoint{};
 	POINT topLeftBorderPoint{};
-	//bool mouseIsStationary = false;
 	short mouseStationaryCount = 0;
 	bool foundTooltip = false;
 	bool borderIsVisible = false;
@@ -406,14 +413,13 @@ int main(int argc, char* argv[])
 	short horizontalCheckpoints[3] = { 50, 15, 5 };
 	short verticalCheckpoints[3] = { -15, -5, -2 };
 	
-	// Optimized polling loop (optimization #7)
-	int sleepInterval = 25; // Default sleep interval
+	int sleepInterval = 25;
 	
 	while (true) {
 		if (GetCursorPos(&mousePos)) {
 			if (lastValidMousePos.x == mousePos.x && lastValidMousePos.y == mousePos.y) {
 				mouseStationaryCount++;
-				sleepInterval = 25; // Normal interval when stationary
+				sleepInterval = 25;
 			}
 			else
 			{
@@ -424,43 +430,35 @@ int main(int argc, char* argv[])
 				}
 				mouseStationaryCount = 0;
 				foundTooltip = false;
-				sleepInterval = 50; // Longer interval when moving (optimization #7)
-				cachedPixelBuffer.pixels.clear(); // Clear pixel cache
-				lastScannedCursor = {0, 0}; // Reset last scanned cursor position
+				sleepInterval = 50;
+				cachedPixelBuffer.pixels.clear();
+				lastScannedCursor = {0, 0};
 			}
 
 			bottomLeftBorderPoint.x = mousePos.x + CURSOR_TOOLTIP_OFFSET_X;
 			bottomLeftBorderPoint.y = mousePos.y + CURSOR_TOOLTIP_OFFSET_Y;
 
-			// Check if we've already scanned this cursor position
 			bool alreadyScanned = (mousePos.x == lastScannedCursor.x && mousePos.y == lastScannedCursor.y);
 			
-			// Only try to detect and scan tooltip if we haven't scanned this cursor position yet
 			if (mouseStationaryCount > 2 && !foundTooltip && !alreadyScanned) {
-				// Capture a larger region around the expected tooltip area for batch pixel reading (optimization #1)
-				// Increased size to ensure we cover all border detection pixels
 				int captureX = bottomLeftBorderPoint.x - 100;
 				int captureY = bottomLeftBorderPoint.y - 200;
 				int captureWidth = 600;
 				int captureHeight = 300;
 				
-				// Ensure coordinates are valid
 				if (captureX < 0) captureX = 0;
 				if (captureY < 0) captureY = 0;
 				
-				// Force recapture to ensure fresh pixel data
 				capturePixelRegion(cachedDesktopDC, captureX, captureY, captureWidth, captureHeight, true);
 
 				if (pixelIsValid(bottomLeftBorderPoint.x, bottomLeftBorderPoint.y, red, green, blue)) {
 					borderIsVisible = true;
 				}
-				// Check the pixel to the top right of the config one
 				else if (pixelIsValid(bottomLeftBorderPoint.x + 1, bottomLeftBorderPoint.y - 1, red, green, blue)) {
 					bottomLeftBorderPoint.x++;
 					bottomLeftBorderPoint.y--;
 					borderIsVisible = true;
 				}
-				// Check the pixel to the bottom left of the config one
 				else if (pixelIsValid(bottomLeftBorderPoint.x - 1, bottomLeftBorderPoint.y + 1, red, green, blue)) {
 					bottomLeftBorderPoint.x--;
 					bottomLeftBorderPoint.y++;
@@ -471,7 +469,6 @@ int main(int argc, char* argv[])
 					borderIsVisible = false;
 					offsetX = 0;
 					offsetY = 0;
-					//cout << bottomLeftBorderPoint.x << ',' << bottomLeftBorderPoint.y << endl;
 
 					foundTooltip = true;
 					for (short i = 0; i < std::size(horizontalCheckpoints); i++) {
@@ -490,22 +487,16 @@ int main(int argc, char* argv[])
 					topLeftBorderPoint.x = bottomLeftBorderPoint.x;
 					topLeftBorderPoint.y = bottomLeftBorderPoint.y + offsetY;
 
-					//cout << topLeftBorderPoint.x << ',' << topLeftBorderPoint.y << "|" << bottomRightBorderPoint.x << ',' << bottomRightBorderPoint.y << endl;
-
 					width = bottomRightBorderPoint.x - bottomLeftBorderPoint.x;
 					height = bottomLeftBorderPoint.y - topLeftBorderPoint.y;
-					//cout << "Width: " << width << ", Height: " << height << ", Offset X: " << offsetX << ", Offset Y: " << offsetY << endl;
 
 					if (width > 10 && height > 10) {
-						// Perform OCR (only once per cursor position)
 						scanText = scanForText(tess, topLeftBorderPoint.x + 1, topLeftBorderPoint.y + 1, width, height);
 						
-						// Apply regex replacements using pre-compiled patterns (optimization #6)
 						scanText = regex_replace(scanText, regexNewlineCRLF, " ");
 						scanText = regex_replace(scanText, regexNewlineLF, " ");
 						scanText = regex_replace(scanText, regexAtSymbol, "0");
 						
-						// Mark this cursor position as scanned
 						if (scanText.length() > 3) {
 							lastScannedCursor = mousePos;
 							rtrim(scanText);
