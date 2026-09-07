@@ -1,3 +1,5 @@
+export type AppLanguage = "en" | "ru";
+
 export type UserConfig = {
   mainWindow: {
     width: number;
@@ -22,4 +24,5 @@ export type UserConfig = {
   enableScreenCalibration?: boolean;
   usePveMode?: boolean;
   showTotalPrice?: boolean;
+  language?: AppLanguage;
 };
