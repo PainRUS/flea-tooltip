@@ -1,3 +1,5 @@
+export type AppLanguage = "en" | "ru";
+
 export type UserConfig = {
   mainWindow: {
     width: number;
@@ -22,4 +24,19 @@ export type UserConfig = {
   enableScreenCalibration?: boolean;
   usePveMode?: boolean;
   showTotalPrice?: boolean;
+  language?: AppLanguage;
+  ocrDebugMode?: boolean;
+  ocrDebugStepDelay?: number; // 100-2000 ms
+  lastPriceUpdateAt?: number | null;
+  nextPriceUpdateAt?: number | null;
+  priceUpdateFailed?: boolean;
+  priceColorsEnabled?: boolean;
+  // Four ascending RUB-per-slot boundaries split prices into five color bands.
+  priceColorThresholds?: number[];
+  // Five #RRGGBB colors, from the cheapest band to the most expensive.
+  priceColors?: string[];
+  // Show a compact marker when an item is needed for one or more tasks.
+  showQuestNeedIndicator?: boolean;
+  // Expand the compact marker into the existing per-task list.
+  showQuestTaskNames?: boolean;
 };

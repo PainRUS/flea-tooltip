@@ -4,18 +4,20 @@ import TooltipWindow from "./TooltipWindow";
 import Items from "./Items";
 import IpcConstants from "./IpcConstants";
 import path from "path";
+import fs from "fs";
 import { isDev } from "../utils";
 import koffi from "koffi";
 import log from "electron-log";
 import Item from "./Item";
 import { getUserConfigData } from "../main/services/config";
+import { AppLanguage } from "./UserConfig";
 
 export default class OCRProcess {
   constructor(items: Items, priceListWindow: BrowserWindow) {
     this.priceListWindow = priceListWindow;
     this.items = items;
     this.itemNamesLowerCaseList = this.items.items.map((item) =>
-      item.name.toLowerCase()
+      item.searchName.toLowerCase()
     );
   }
 
@@ -25,6 +27,11 @@ export default class OCRProcess {
   protected itemNamesLowerCaseList: string[] = [];
   protected user32: koffi.IKoffiLib;
   protected Point: koffi.IKoffiCType;
+  protected language: AppLanguage = "en";
+  protected stdoutBuffer = "";
+  protected hasTrackedTooltipItem = false;
+  protected tooltipFollowTimer: ReturnType<typeof setInterval> | null = null;
+  protected lastFollowCursor: { x: number; y: number } | null = null;
 
   public setPriceListWindow(priceListWindow: BrowserWindow): void {
     this.priceListWindow = priceListWindow;
@@ -35,7 +42,6 @@ export default class OCRProcess {
       "int __stdcall GetCursorPos(_Out_ POINT *pos)"
     );
 
-    // Get and show cursor position
     const pos = {};
     try {
       if (!GetCursorPos(pos)) throw new Error("Failed to get cursor position");
@@ -51,7 +57,6 @@ export default class OCRProcess {
     physicalX: number,
     physicalY: number
   ): { x: number; y: number } {
-    // Get the display containing the cursor
     const display = screen.getDisplayNearestPoint({
       x: physicalX,
       y: physicalY,
@@ -71,41 +76,78 @@ export default class OCRProcess {
       y: "long",
     });
 
-    // Get RGB border color values from config
     const userConfig = getUserConfigData();
     const redValue = userConfig.borderColorRed ?? 82;
     const greenValue = userConfig.borderColorGreen ?? 89;
     const blueValue = userConfig.borderColorBlue ?? 90;
+    this.language = userConfig.language ?? "en";
+
+    const debugMode = userConfig.ocrDebugMode ?? false;
+    const debugStepDelay = Math.max(
+      100,
+      Math.min(2000, userConfig.ocrDebugStepDelay ?? 800)
+    );
+
+    const tesseractLanguage = this.language === "ru" ? "rus" : "eng";
+    const ocrDir = isDev()
+      ? path.join(app.getAppPath(), "lib", "ocr")
+      : path.join(process.resourcesPath, "ocr");
+    const ocrExecutable = path.join(ocrDir, "ocr_cpp.exe");
+    const trainedDataPath = path.join(
+      ocrDir,
+      `${tesseractLanguage}.traineddata`
+    );
+
+    if (!fs.existsSync(trainedDataPath)) {
+      const message = `Missing OCR language data: ${trainedDataPath}`;
+      isDev() ? console.error(message) : log.error(message);
+      return;
+    }
 
     isDev()
       ? console.log(
           "Initializing OCR process with values:",
           redValue,
           greenValue,
-          blueValue
+          blueValue,
+          "language:",
+          tesseractLanguage,
+          "debug:",
+          debugMode,
+          "debug delay:",
+          debugStepDelay
         )
-      : log.info("Initializing OCR process");
+      : log.info(
+          `Initializing OCR process (${tesseractLanguage}, debug=${debugMode}, delay=${debugStepDelay}ms)`
+        );
 
-    // const ocrProcess = ;
-    const ocrProcess = isDev()
-      ? spawn(path.join(app.getAppPath(), "/lib/ocr/ocr_cpp.exe"), [
-          redValue.toString(),
-          greenValue.toString(),
-          blueValue.toString(),
-        ])
-      : spawn(path.join(process.resourcesPath, "/ocr/ocr_cpp.exe"), [
-          redValue.toString(),
-          greenValue.toString(),
-          blueValue.toString(),
-        ]);
+    const ocrProcess = spawn(
+      ocrExecutable,
+      [
+        redValue.toString(),
+        greenValue.toString(),
+        blueValue.toString(),
+        tesseractLanguage,
+        debugMode ? "1" : "0",
+        debugStepDelay.toString(),
+      ],
+      {
+        cwd: ocrDir,
+        env: {
+          ...process.env,
+          TESSDATA_PREFIX: ocrDir,
+        },
+      }
+    );
 
     ocrProcess.stdout.setEncoding("utf-8");
-    ocrProcess.stdout.on("data", this.onNewData.bind(this));
+    ocrProcess.stdout.on("data", this.onStdoutChunk.bind(this));
     ocrProcess.stderr.on("data", function (data) {
       isDev() ? console.log("stderr: " + data) : log.error("stderr: " + data);
     });
 
-    ocrProcess.on("close", function (code) {
+    ocrProcess.on("close", (code) => {
+      this.stopTooltipFollow();
       isDev()
         ? console.log("closing code: " + code)
         : log.info("closing code: " + code);
@@ -114,35 +156,126 @@ export default class OCRProcess {
     isDev()
       ? console.log("Successfully initialized OCR process")
       : log.info("Successfully initialized OCR process");
-    return;
+  }
+
+  // stdout is a byte stream: one chunk can contain several scanner messages or
+  // half of one UTF-8 message. Buffer it and process complete lines only.
+  onStdoutChunk(data: any): void {
+    this.stdoutBuffer += data.toString();
+    const lines = this.stdoutBuffer.split(/\r?\n/);
+    this.stdoutBuffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      this.onNewData(line);
+    }
+  }
+
+  protected stopTooltipFollow(): void {
+    if (this.tooltipFollowTimer) {
+      clearInterval(this.tooltipFollowTimer);
+      this.tooltipFollowTimer = null;
+    }
+    this.lastFollowCursor = null;
+  }
+
+  protected startTooltipFollow(): void {
+    this.stopTooltipFollow();
+
+    const followCursor = () => {
+      if (
+        !this.hasTrackedTooltipItem ||
+        !this.tooltipWindow ||
+        this.tooltipWindow.isDestroyed()
+      ) {
+        this.stopTooltipFollow();
+        return;
+      }
+
+      // Electron already returns logical/DIP coordinates here, exactly what
+      // BrowserWindow positioning expects. This path does no OCR, screenshots
+      // or DOM work; it only moves the existing native window when X/Y changed.
+      const cursor = screen.getCursorScreenPoint();
+      if (
+        !this.lastFollowCursor ||
+        cursor.x !== this.lastFollowCursor.x ||
+        cursor.y !== this.lastFollowCursor.y
+      ) {
+        this.lastFollowCursor = cursor;
+        this.tooltipWindow.moveNearCursor(cursor.x, cursor.y);
+      }
+    };
+
+    followCursor();
+    this.tooltipFollowTimer = setInterval(followCursor, 16);
+  }
+
+  protected hideTrackedTooltip(): void {
+    this.stopTooltipFollow();
+    this.hasTrackedTooltipItem = false;
+
+    if (!this.tooltipWindow || this.tooltipWindow.isDestroyed()) {
+      return;
+    }
+
+    if (!this.tooltipWindow.webContents.isDestroyed()) {
+      this.tooltipWindow.webContents.send(IpcConstants.NewTooltipItem, null);
+    }
+
+    // Native tracking already confirmed that Tarkov's name rectangle vanished,
+    // so there is no reason to keep the price card around for another 30 ms.
+    this.tooltipWindow.hideTooltip();
   }
 
   onNewData(data: any): void {
     try {
-      if (data.includes("IGNORE||NO CONFIG FILE FOUND")) {
+      const incomingData = String(data).trim();
+      if (!incomingData) {
+        return;
+      }
+
+      if (incomingData.startsWith("DEBUG|")) {
+        // Visual debug is rendered by the native OCR process. Keep a textual
+        // trace in the development console as well without feeding it into
+        // item matching.
+        if (isDev()) {
+          console.log(incomingData);
+        }
+        return;
+      }
+
+      if (incomingData.includes("IGNORE||NO CONFIG FILE FOUND")) {
         this.priceListWindow.webContents.send(
           IpcConstants.ScreenConfigureNeeded
         );
         return;
       }
 
-      const text = new String(data);
-      const incomingData = text.toString().trim();
+      if (incomingData.startsWith("TRACKMOVE|")) {
+        // Legacy/native tracking messages are intentionally ignored for visual
+        // movement. The Electron 60 FPS cursor loop owns price-window motion.
+        return;
+      }
+
+      if (incomingData === "TOOLTIP_LOST") {
+        this.hideTrackedTooltip();
+        return;
+      }
+
       if (incomingData === "MOUSEMOVE") {
-        if (this.tooltipWindow) {
-          this.tooltipWindow.webContents.send(
-            IpcConstants.NewTooltipItem,
-            null
-          );
-          setTimeout(() => {
-            this.tooltipWindow.setBounds({ width: 0, height: 0, x: 0, y: 0 });
-          }, 30);
-        }
+        this.hideTrackedTooltip();
       } else if (incomingData.includes("||")) {
-        // eslint-disable-next-line no-control-regex
-        const incomingDataCleanedUp = incomingData.replace(/[^\x00-\x7F]/g, "");
+        // English OCR historically strips non-ASCII noise. Russian OCR must
+        // preserve UTF-8 Cyrillic output.
+        const incomingDataCleanedUp =
+          this.language === "ru"
+            ? incomingData
+            : incomingData.replace(/[^\x00-\x7F]/g, "");
         let itemName = incomingDataCleanedUp.split("||")[0];
         const coords = incomingDataCleanedUp.split("||")[1];
+        if (!coords || !coords.includes(",")) {
+          return;
+        }
+
         const x = parseInt(coords.split(",")[0]);
         const y = parseInt(coords.split(",")[1]);
         let item: Item | null = null;
@@ -154,25 +287,30 @@ export default class OCRProcess {
         ) {
           if (this.itemNamesLowerCaseList.includes(itemName.toLowerCase())) {
             item = this.items.items.find(
-              (x) => x.name.toLowerCase() === itemName.toLowerCase()
+              (candidate) =>
+                candidate.searchName.toLowerCase() === itemName.toLowerCase()
             );
           } else {
-            if (itemName.includes("WD-40 (1")) {
-              itemName = "WD-40 (100ml)";
-            } else if (itemName.includes("WD-40 (4")) {
-              itemName = "WD-40 (400ml)";
-            }
+            // These OCR corrections are English-specific and are intentionally
+            // disabled when Russian scanning is selected.
+            if (this.language === "en") {
+              if (itemName.includes("WD-40 (1")) {
+                itemName = "WD-40 (100ml)";
+              } else if (itemName.includes("WD-40 (4")) {
+                itemName = "WD-40 (400ml)";
+              }
 
-            if (itemName.toLowerCase().includes("kektape")) {
-              itemName = "kektape";
-            }
+              if (itemName.toLowerCase().includes("kektape")) {
+                itemName = "kektape";
+              }
 
-            if (itemName.toLowerCase().includes("pc cpi")) {
-              itemName = "pc cpu";
-            }
+              if (itemName.toLowerCase().includes("pc cpi")) {
+                itemName = "pc cpu";
+              }
 
-            if (itemName.toLowerCase().includes("mule")) {
-              itemName = "M.U.L.E stimulant injector";
+              if (itemName.toLowerCase().includes("mule")) {
+                itemName = "M.U.L.E stimulant injector";
+              }
             }
 
             const allowedLowerScoreItems = [
@@ -191,9 +329,10 @@ export default class OCRProcess {
               const userConfig = getUserConfigData();
               item = this.items.search(
                 itemName,
-                allowedLowerScoreItems.filter((i) =>
-                  itemName.toLowerCase().includes(i)
-                ).length > 0
+                this.language === "en" &&
+                  allowedLowerScoreItems.some((value) =>
+                    itemName.toLowerCase().includes(value)
+                  )
                   ? 12
                   : userConfig.lowestAcceptableScore ?? 50
               );
@@ -203,7 +342,9 @@ export default class OCRProcess {
 
         if (item && item.name !== "T H I C C item case") {
           const mousePos = this.getMousePos();
-          const electronMousePos = screen.getCursorScreenPoint();
+          if (!mousePos) {
+            return;
+          }
 
           if (
             mousePos.x < 2560 / 2 + 10 &&
@@ -226,23 +367,25 @@ export default class OCRProcess {
             }
 
             if (this.tooltipWindow) {
+              this.hasTrackedTooltipItem = true;
               this.tooltipWindow.webContents.send(
                 IpcConstants.NewTooltipItem,
                 item
               );
               setTimeout(() => {
-                // Convert physical pixel coordinates to logical coordinates for proper 4K/high-DPI support
+                if (!this.hasTrackedTooltipItem || !this.tooltipWindow) {
+                  return;
+                }
+
                 const logicalPos = this.getLogicalPosition(
                   mousePos.x,
                   mousePos.y
                 );
-                this.tooltipWindow.setPosition(
-                  logicalPos.x + 13,
-                  logicalPos.y + 13
+                this.tooltipWindow.showNearCursor(
+                  logicalPos.x,
+                  logicalPos.y
                 );
-                setTimeout(() => {
-                  this.tooltipWindow.setBounds({ width: 500, height: 500 });
-                }, 10);
+                this.startTooltipFollow();
               }, 5);
             }
           }

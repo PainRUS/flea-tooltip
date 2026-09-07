@@ -10,7 +10,9 @@
     "postpackage": "powershell -Command \"Move-Item -Path './out/FleaTooltip-win32-x64/resources/eng.traineddata' -Destination './out/FleaTooltip-win32-x64/'\"",
     "make": "electron-forge make",
     "publish": "electron-forge publish",
-    "lint": "eslint --ext .ts,.tsx ."
+    "lint": "eslint --ext .ts,.tsx .",
+    "test:search": "node --test -r ts-node/register/transpile-only tests/items-search.test.cjs tests/price-values.test.cjs",
+    "setup:ru-ocr": "node scripts/setup-russian-ocr.js"
   },
   "keywords": [],
   "author": {
@@ -55,7 +57,7 @@
     "koffi": "^2.14.1",
     "minisearch": "^6.3.0",
     "postcss-loader": "^7.3.4",
-    "postcss-preset-env": "^9.3.0",
+    "postcss-preset-env": "^9.3.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.20.1",

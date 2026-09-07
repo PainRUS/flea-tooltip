@@ -2,7 +2,10 @@ export default class Item {
   id: string;
   name: string;
   shortName: string;
+  searchName: string;
+  searchShortName: string;
   availableOnFleaMarket: boolean;
+  fleaMarketMinLevel?: number;
   prices: ItemPrices;
   slots: number;
   tasks: ItemTask[];
@@ -13,12 +16,14 @@ type ItemPrices = {
   latest: number;
   avgDay: number;
   avgWeek: number;
+  updatedAt?: number;
   trader: TraderPrice;
 };
 
 type TraderPrice = {
   name: string;
   price: number;
+  traderId?: string;
 };
 
 export type ItemTask = {
@@ -34,10 +39,13 @@ export class ClientItem extends Item {
   constructor(item: Item) {
     super();
     this.availableOnFleaMarket = item.availableOnFleaMarket;
+    this.fleaMarketMinLevel = item.fleaMarketMinLevel;
     this.id = item.id;
     this.name = item.name;
     this.prices = item.prices;
     this.shortName = item.shortName;
+    this.searchName = item.searchName;
+    this.searchShortName = item.searchShortName;
     this.slots = item.slots;
     this.tasks = item.tasks;
     this.count = 1;

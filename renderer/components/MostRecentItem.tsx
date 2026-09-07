@@ -15,7 +15,7 @@ export default function MostRecentItem({ item }: { item: ClientItem | null }) {
           </div>
 
           <div className="col-span-3 pl-2">
-            <div className="text-xl font-semibold">{item.name}</div>
+            <div className="text-xl font-semibold">{item.searchName}</div>
           </div>
         </div>
       )}

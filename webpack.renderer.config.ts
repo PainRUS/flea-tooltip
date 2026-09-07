@@ -1,4 +1,5 @@
 import type { Configuration } from "webpack";
+import path from "path";
 
 import { rules } from "./webpack.rules";
 import { plugins } from "./webpack.plugins";
@@ -29,6 +30,16 @@ export const rendererConfig: Configuration = {
   plugins,
   resolve: {
     extensions: [".js", ".ts", ".jsx", ".tsx", ".css"],
+    // FleaTooltip only uses @number-flow/react for the Total value. The
+    // animated custom element leaves multiple digit layers visibly stacked in
+    // this Electron renderer, so use a plain-text compatibility renderer for
+    // this application instead.
+    alias: {
+      "@number-flow/react": path.resolve(
+        __dirname,
+        "renderer/components/StaticNumberFlow.tsx"
+      ),
+    },
   },
   // target: 'electron-renderer',
 };
