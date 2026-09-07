@@ -28,6 +28,7 @@ export default class OCRProcess {
   protected user32: koffi.IKoffiLib;
   protected Point: koffi.IKoffiCType;
   protected language: AppLanguage = "en";
+  protected stdoutBuffer = "";
 
   public setPriceListWindow(priceListWindow: BrowserWindow): void {
     this.priceListWindow = priceListWindow;
@@ -78,6 +79,12 @@ export default class OCRProcess {
     const blueValue = userConfig.borderColorBlue ?? 90;
     this.language = userConfig.language ?? "en";
 
+    const debugMode = userConfig.ocrDebugMode ?? false;
+    const debugStepDelay = Math.max(
+      100,
+      Math.min(2000, userConfig.ocrDebugStepDelay ?? 800)
+    );
+
     const tesseractLanguage = this.language === "ru" ? "rus" : "eng";
     const ocrDir = isDev()
       ? path.join(app.getAppPath(), "lib", "ocr")
@@ -101,9 +108,15 @@ export default class OCRProcess {
           greenValue,
           blueValue,
           "language:",
-          tesseractLanguage
+          tesseractLanguage,
+          "debug:",
+          debugMode,
+          "debug delay:",
+          debugStepDelay
         )
-      : log.info(`Initializing OCR process (${tesseractLanguage})`);
+      : log.info(
+          `Initializing OCR process (${tesseractLanguage}, debug=${debugMode}, delay=${debugStepDelay}ms)`
+        );
 
     const ocrProcess = spawn(
       ocrExecutable,
@@ -112,6 +125,8 @@ export default class OCRProcess {
         greenValue.toString(),
         blueValue.toString(),
         tesseractLanguage,
+        debugMode ? "1" : "0",
+        debugStepDelay.toString(),
       ],
       {
         cwd: ocrDir,
@@ -123,7 +138,7 @@ export default class OCRProcess {
     );
 
     ocrProcess.stdout.setEncoding("utf-8");
-    ocrProcess.stdout.on("data", this.onNewData.bind(this));
+    ocrProcess.stdout.on("data", this.onStdoutChunk.bind(this));
     ocrProcess.stderr.on("data", function (data) {
       isDev() ? console.log("stderr: " + data) : log.error("stderr: " + data);
     });
@@ -139,17 +154,42 @@ export default class OCRProcess {
       : log.info("Successfully initialized OCR process");
   }
 
+  // stdout is a byte stream: one chunk can contain several scanner messages or
+  // half of one UTF-8 message. Buffer it and process complete lines only.
+  onStdoutChunk(data: any): void {
+    this.stdoutBuffer += data.toString();
+    const lines = this.stdoutBuffer.split(/\r?\n/);
+    this.stdoutBuffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      this.onNewData(line);
+    }
+  }
+
   onNewData(data: any): void {
     try {
-      if (data.includes("IGNORE||NO CONFIG FILE FOUND")) {
+      const incomingData = String(data).trim();
+      if (!incomingData) {
+        return;
+      }
+
+      if (incomingData.startsWith("DEBUG|")) {
+        // Visual debug is rendered by the native OCR process. Keep a textual
+        // trace in the development console as well without feeding it into
+        // item matching.
+        if (isDev()) {
+          console.log(incomingData);
+        }
+        return;
+      }
+
+      if (incomingData.includes("IGNORE||NO CONFIG FILE FOUND")) {
         this.priceListWindow.webContents.send(
           IpcConstants.ScreenConfigureNeeded
         );
         return;
       }
 
-      const text = new String(data);
-      const incomingData = text.toString().trim();
       if (incomingData === "MOUSEMOVE") {
         if (this.tooltipWindow) {
           this.tooltipWindow.webContents.send(
