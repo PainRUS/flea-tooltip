@@ -11,7 +11,7 @@
     "make": "electron-forge make",
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx .",
-    "test:search": "node --test -r ts-node/register/transpile-only tests/*.test.cjs",
+    "test:search": "node --test -r ts-node/register/transpile-only tests/items-search.test.cjs tests/price-values.test.cjs",
     "setup:ru-ocr": "node scripts/setup-russian-ocr.js"
   },
   "keywords": [],
@@ -27,7 +27,7 @@
     "@electron-forge/maker-squirrel": "^7.2.0",
     "@electron-forge/maker-zip": "^7.2.0",
     "@electron-forge/plugin-auto-unpack-natives": "^7.2.0",
-    "@electron-forge/plugin-webpack": "^7.2.0",
+    "@electron-fororge/plugin-webpack": "^7.2.0",
     "@types/react": "^18.2.42",
     "@types/react-dom": "^18.2.17",
     "@types/request": "^2.48.13",
