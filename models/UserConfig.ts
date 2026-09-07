@@ -35,4 +35,8 @@ export type UserConfig = {
   priceColorThresholds?: number[];
   // Five #RRGGBB colors, from the cheapest band to the most expensive.
   priceColors?: string[];
+  // Show a compact marker when an item is needed for one or more tasks.
+  showQuestNeedIndicator?: boolean;
+  // Expand the compact marker into the existing per-task list.
+  showQuestTaskNames?: boolean;
 };
