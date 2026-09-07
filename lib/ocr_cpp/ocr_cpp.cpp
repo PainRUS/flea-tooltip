@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <regex>
 #include <string>
+#include <sstream>
 #include <nlohmann/json.hpp>
 
 using namespace std;
@@ -24,6 +25,11 @@ using json = nlohmann::json;
 static short borderColorRed = 82;
 static short borderColorGreen = 89;
 static short borderColorBlue = 90;
+
+// Optional visual diagnostic mode. It is completely dormant in normal mode.
+static bool debugMode = false;
+static int debugStepDelayMs = 800;
+static bool debugRussian = false;
 
 // Pre-compiled regex patterns for performance
 static const std::regex regexNewlineCRLF("\r\n");
@@ -109,6 +115,238 @@ Image::Image(HDC DC, int X, int Y, int Width, int Height) : Pixels(), width(Widt
 	DeleteDC(SDC);
 	DeleteObject(hSBmp);
 	ReleaseDC(nullptr, MemDC);
+}
+
+// ----------------------------
+// Visual debug overlay helpers
+// ----------------------------
+
+enum class DebugShapeType {
+	Rect,
+	Point,
+	Line,
+};
+
+struct DebugShape {
+	DebugShapeType type;
+	LONG x1;
+	LONG y1;
+	LONG x2;
+	LONG y2;
+	COLORREF color;
+};
+
+struct DebugOverlayState {
+	const vector<DebugShape>* shapes;
+	const wstring* label;
+	int virtualX;
+	int virtualY;
+};
+
+static wstring debugText(const wchar_t* english, const wchar_t* russian) {
+	return debugRussian ? wstring(russian) : wstring(english);
+}
+
+static wstring utf8ToWide(const string& value) {
+	if (value.empty()) {
+		return L"";
+	}
+
+	int required = MultiByteToWideChar(
+		CP_UTF8,
+		0,
+		value.c_str(),
+		static_cast<int>(value.size()),
+		nullptr,
+		0
+	);
+	if (required <= 0) {
+		return L"";
+	}
+
+	wstring result(static_cast<size_t>(required), L'\0');
+	MultiByteToWideChar(
+		CP_UTF8,
+		0,
+		value.c_str(),
+		static_cast<int>(value.size()),
+		&result[0],
+		required
+	);
+	return result;
+}
+
+static void debugLog(const string& message) {
+	if (!debugMode) {
+		return;
+	}
+	cout << "DEBUG|" << message << endl;
+	fflush(stdout);
+}
+
+static LRESULT CALLBACK DebugOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	if (msg == WM_NCCREATE) {
+		CREATESTRUCTW* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+		SetWindowLongPtrW(
+			hwnd,
+			GWLP_USERDATA,
+			reinterpret_cast<LONG_PTR>(create->lpCreateParams)
+		);
+	}
+
+	DebugOverlayState* state = reinterpret_cast<DebugOverlayState*>(
+		GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+	);
+
+	switch (msg) {
+	case WM_ERASEBKGND:
+		return 1;
+	case WM_PAINT:
+	{
+		PAINTSTRUCT ps;
+		HDC hdc = BeginPaint(hwnd, &ps);
+
+		RECT clientRect;
+		GetClientRect(hwnd, &clientRect);
+		HBRUSH transparentKeyBrush = CreateSolidBrush(RGB(0, 0, 0));
+		FillRect(hdc, &clientRect, transparentKeyBrush);
+		DeleteObject(transparentKeyBrush);
+
+		if (state && state->shapes) {
+			HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+			for (const DebugShape& shape : *state->shapes) {
+				HPEN pen = CreatePen(PS_SOLID, 3, shape.color);
+				HGDIOBJ oldPen = SelectObject(hdc, pen);
+
+				int x1 = static_cast<int>(shape.x1) - state->virtualX;
+				int y1 = static_cast<int>(shape.y1) - state->virtualY;
+				int x2 = static_cast<int>(shape.x2) - state->virtualX;
+				int y2 = static_cast<int>(shape.y2) - state->virtualY;
+
+				switch (shape.type) {
+				case DebugShapeType::Rect:
+					Rectangle(hdc, x1, y1, x2, y2);
+					break;
+				case DebugShapeType::Point:
+					Ellipse(hdc, x1 - 7, y1 - 7, x1 + 7, y1 + 7);
+					MoveToEx(hdc, x1 - 11, y1, nullptr);
+					LineTo(hdc, x1 + 11, y1);
+					MoveToEx(hdc, x1, y1 - 11, nullptr);
+					LineTo(hdc, x1, y1 + 11);
+					break;
+				case DebugShapeType::Line:
+					MoveToEx(hdc, x1, y1, nullptr);
+					LineTo(hdc, x2, y2);
+					break;
+				}
+
+				SelectObject(hdc, oldPen);
+				DeleteObject(pen);
+			}
+			SelectObject(hdc, oldBrush);
+		}
+
+		if (state && state->label && !state->label->empty()) {
+			const int boxX = 20;
+			const int boxY = 20;
+			const int boxWidth = 820;
+			const int boxHeight = 44;
+			RECT labelRect = { boxX, boxY, boxX + boxWidth, boxY + boxHeight };
+			HBRUSH labelBrush = CreateSolidBrush(RGB(35, 35, 35));
+			FillRect(hdc, &labelRect, labelBrush);
+			DeleteObject(labelBrush);
+			SetBkMode(hdc, TRANSPARENT);
+			SetTextColor(hdc, RGB(255, 255, 255));
+			HGDIOBJ oldFont = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+			TextOutW(
+				hdc,
+				boxX + 10,
+				boxY + 13,
+				state->label->c_str(),
+				static_cast<int>(state->label->size())
+			);
+			SelectObject(hdc, oldFont);
+		}
+
+		EndPaint(hwnd, &ps);
+		return 0;
+	}
+	}
+
+	return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static bool ensureDebugOverlayClassRegistered() {
+	static bool registered = false;
+	if (registered) {
+		return true;
+	}
+
+	WNDCLASSEXW wc = {};
+	wc.cbSize = sizeof(WNDCLASSEXW);
+	wc.lpfnWndProc = DebugOverlayWndProc;
+	wc.hInstance = GetModuleHandleW(nullptr);
+	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	wc.lpszClassName = L"FleaTooltipOcrDebugOverlay";
+
+	if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+		return false;
+	}
+
+	registered = true;
+	return true;
+}
+
+static void showDebugStep(const vector<DebugShape>& shapes, const wstring& label) {
+	if (!debugMode || !ensureDebugOverlayClassRegistered()) {
+		return;
+	}
+
+	int virtualX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	int virtualY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	int virtualWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	int virtualHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+	DebugOverlayState state = { &shapes, &label, virtualX, virtualY };
+	HINSTANCE instance = GetModuleHandleW(nullptr);
+	HWND overlay = CreateWindowExW(
+		WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+		L"FleaTooltipOcrDebugOverlay",
+		L"",
+		WS_POPUP,
+		virtualX,
+		virtualY,
+		virtualWidth,
+		virtualHeight,
+		nullptr,
+		nullptr,
+		instance,
+		&state
+	);
+
+	if (!overlay) {
+		return;
+	}
+
+	// Everything painted pure black is transparent; only diagnostic geometry
+	// and labels remain visible.
+	SetLayeredWindowAttributes(overlay, RGB(0, 0, 0), 0, LWA_COLORKEY);
+	SetWindowPos(
+		overlay,
+		HWND_TOPMOST,
+		virtualX,
+		virtualY,
+		virtualWidth,
+		virtualHeight,
+		SWP_NOACTIVATE | SWP_SHOWWINDOW
+	);
+	UpdateWindow(overlay);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(debugStepDelayMs));
+
+	// Destroy before the next real capture so the debug overlay can never be
+	// included in OCR input.
+	DestroyWindow(overlay);
 }
 
 static bool pixelIsBorderColor(short& red, short& green, short& blue) {
@@ -204,22 +442,19 @@ static bool capturePixelRegion(HDC dc, int x, int y, int width, int height, bool
 
 // Read pixel from cached buffer (optimization #1)
 static bool getPixelFromBuffer(int x, int y, short& red, short& green, short& blue) {
-	// Check if pixel is within cached region
 	int relX = x - cachedPixelBuffer.x;
 	int relY = y - cachedPixelBuffer.y;
 
 	if (relX < 0 || relY < 0 || relX >= cachedPixelBuffer.width || relY >= cachedPixelBuffer.height) {
-		return false; // Pixel not in cached region
+		return false;
 	}
 
-	// Calculate offset in buffer (BGRA format, bottom-up was flipped to top-down)
 	int offset = (relY * cachedPixelBuffer.bytesPerScanLine) + (relX * cachedPixelBuffer.bytesPerPixel);
 	
 	if (offset + 2 >= static_cast<int>(cachedPixelBuffer.pixels.size())) {
 		return false;
 	}
 
-	// Windows DIB is BGRA format
 	blue = cachedPixelBuffer.pixels[offset];
 	green = cachedPixelBuffer.pixels[offset + 1];
 	red = cachedPixelBuffer.pixels[offset + 2];
@@ -231,16 +466,13 @@ static bool pixelIsValid(short startingX, short startingY, short& red, short& gr
 	LONG x = startingX + offsetX;
 	LONG y = startingY + offsetY;
 
-	// Try to read from cached buffer first
 	if (getPixelFromBuffer(x, y, red, green, blue)) {
 		return pixelIsBorderColor(red, green, blue);
 	}
 
-	// Fallback to GetPixel if not in cache (shouldn't happen with proper caching)
 	if (cachedDesktopDC) {
 		COLORREF color = GetPixel(cachedDesktopDC, x, y);
 		if (color == CLR_INVALID) {
-			// GetPixel failed - could be due to hardware acceleration or other issues
 			return false;
 		}
 		red = GetRValue(color);
@@ -279,7 +511,6 @@ static std::string scanForText(tesseract::TessBaseAPI& tess, int x1, int y1, int
 		return result;
 	}
 
-	// Capture the image
 	Image img(cachedDesktopDC, x1, y1, width, height);
 
 	tess.SetImage(img.GetPixels(), img.GetWidth(), img.GetHeight(),
@@ -295,25 +526,19 @@ static std::string scanForText(tesseract::TessBaseAPI& tess, int x1, int y1, int
 }
 
 static void rtrim(std::string& s) {
-	// Define the characters to trim (common whitespaces)
 	const std::string whitespaces = " \t\n\r\f\v";
-
-	// Find the position of the last non-whitespace character
 	size_t last_non_space = s.find_last_not_of(whitespaces);
 
-	// If a non-whitespace character is found, resize the string to end just after it
 	if (last_non_space != std::string::npos) {
 		s.erase(last_non_space + 1);
 	}
 	else {
-		// If the string contains only whitespace (or is empty), clear it
 		s.clear();
 	}
 }
 
 int main(int argc, char* argv[])
 {
-	// Set DPI awareness to ensure cursor coordinates match actual screen pixels
 	SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
 
 	// Parse optional command line arguments for border color: red green blue
@@ -323,18 +548,33 @@ int main(int argc, char* argv[])
 			borderColorGreen = static_cast<short>(std::stoi(argv[2]));
 			borderColorBlue = static_cast<short>(std::stoi(argv[3]));
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception&) {
 			std::cerr << "Error parsing color arguments. Using default values." << std::endl;
 		}
 	}
 
-	// Optional OCR language argument. Only explicitly supported languages are
-	// accepted so the scanner never guesses the game language.
+	// Explicit OCR language. There is intentionally no auto-detection.
 	std::string ocrLanguage = "eng";
 	if (argc >= 5) {
 		std::string requestedLanguage = argv[4];
 		if (requestedLanguage == "rus" || requestedLanguage == "eng") {
 			ocrLanguage = requestedLanguage;
+		}
+	}
+	debugRussian = ocrLanguage == "rus";
+
+	// Visual debug settings. They affect timing/visualization only when enabled.
+	if (argc >= 6) {
+		debugMode = std::string(argv[5]) == "1";
+	}
+	if (argc >= 7) {
+		try {
+			debugStepDelayMs = std::stoi(argv[6]);
+			if (debugStepDelayMs < 100) debugStepDelayMs = 100;
+			if (debugStepDelayMs > 2000) debugStepDelayMs = 2000;
+		}
+		catch (const std::exception&) {
+			debugStepDelayMs = 800;
 		}
 	}
 
@@ -364,7 +604,6 @@ int main(int argc, char* argv[])
 		CURSOR_TOOLTIP_OFFSET_Y = data["offsetY"];
 	}
 
-	// Initialize cached desktop DC (optimization #2)
 	cachedDesktopWindow = GetDesktopWindow();
 	cachedDesktopDC = GetDC(cachedDesktopWindow);
 	if (!cachedDesktopDC) {
@@ -380,11 +619,10 @@ int main(int argc, char* argv[])
 		exit(1);
 	}
 
-	// Optimize Tesseract settings for speed (optimization #3)
 	tess.SetPageSegMode(tesseract::PSM_SINGLE_BLOCK);
 	if (ocrLanguage == "eng") {
-		// Keep the original restrictive whitelist for English. Russian mode must
-		// preserve Cyrillic characters, so it intentionally does not use it.
+		// Preserve the original English-only optimization. Russian mode cannot
+		// use this whitelist because it would remove Cyrillic before recognition.
 		tess.SetVariable("tessedit_char_whitelist", "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,$€₽@- ");
 	}
 	tess.SetVariable("classify_bln_numeric_mode", "1");
@@ -441,6 +679,8 @@ int main(int argc, char* argv[])
 			bool alreadyScanned = (mousePos.x == lastScannedCursor.x && mousePos.y == lastScannedCursor.y);
 			
 			if (mouseStationaryCount > 2 && !foundTooltip && !alreadyScanned) {
+				// This is deliberately the original capture geometry. Debug mode is
+				// meant to reveal whether it is sufficient before we change it.
 				int captureX = bottomLeftBorderPoint.x - 100;
 				int captureY = bottomLeftBorderPoint.y - 200;
 				int captureWidth = 600;
@@ -451,15 +691,79 @@ int main(int argc, char* argv[])
 				
 				capturePixelRegion(cachedDesktopDC, captureX, captureY, captureWidth, captureHeight, true);
 
-				if (pixelIsValid(bottomLeftBorderPoint.x, bottomLeftBorderPoint.y, red, green, blue)) {
+				vector<DebugShape> debugShapes;
+				if (debugMode) {
+					debugShapes.push_back({
+						DebugShapeType::Rect,
+						captureX,
+						captureY,
+						captureX + captureWidth,
+						captureY + captureHeight,
+						RGB(0, 220, 255)
+					});
+					ostringstream captureLog;
+					captureLog << "CAPTURE|" << captureX << "|" << captureY << "|" << captureWidth << "|" << captureHeight;
+					debugLog(captureLog.str());
+					showDebugStep(
+						debugShapes,
+						debugText(L"1. Captured search area (600 x 300)", L"1. Снята область поиска (600 x 300)")
+					);
+				}
+
+				auto testBorderPoint = [&](LONG x, LONG y, const wstring& stageLabel, const string& logName) -> bool {
+					bool matched = pixelIsValid(
+						static_cast<short>(x),
+						static_cast<short>(y),
+						red,
+						green,
+						blue
+					);
+
+					if (debugMode) {
+						debugShapes.push_back({
+							DebugShapeType::Point,
+							x,
+							y,
+							x,
+							y,
+							matched ? RGB(0, 255, 80) : RGB(255, 70, 70)
+						});
+						ostringstream pointLog;
+						pointLog << logName << "|" << x << "|" << y << "|" << (matched ? "MATCH" : "MISS");
+						debugLog(pointLog.str());
+						wstring resultLabel = stageLabel +
+							(matched
+								? debugText(L" - border color matched", L" - цвет рамки совпал")
+								: debugText(L" - different color", L" - другой цвет"));
+						showDebugStep(debugShapes, resultLabel);
+					}
+					return matched;
+				};
+
+				if (testBorderPoint(
+					bottomLeftBorderPoint.x,
+					bottomLeftBorderPoint.y,
+					debugText(L"2. Testing configured start pixel", L"2. Проверка стартового пикселя"),
+					"START_PIXEL"
+				)) {
 					borderIsVisible = true;
 				}
-				else if (pixelIsValid(bottomLeftBorderPoint.x + 1, bottomLeftBorderPoint.y - 1, red, green, blue)) {
+				else if (testBorderPoint(
+					bottomLeftBorderPoint.x + 1,
+					bottomLeftBorderPoint.y - 1,
+					debugText(L"3. Testing +1 / -1 fallback", L"3. Проверка запасной точки +1 / -1"),
+					"FALLBACK_PLUS"
+				)) {
 					bottomLeftBorderPoint.x++;
 					bottomLeftBorderPoint.y--;
 					borderIsVisible = true;
 				}
-				else if (pixelIsValid(bottomLeftBorderPoint.x - 1, bottomLeftBorderPoint.y + 1, red, green, blue)) {
+				else if (testBorderPoint(
+					bottomLeftBorderPoint.x - 1,
+					bottomLeftBorderPoint.y + 1,
+					debugText(L"4. Testing -1 / +1 fallback", L"4. Проверка запасной точки -1 / +1"),
+					"FALLBACK_MINUS"
+				)) {
 					bottomLeftBorderPoint.x--;
 					bottomLeftBorderPoint.y++;
 					borderIsVisible = true;
@@ -469,11 +773,50 @@ int main(int argc, char* argv[])
 					borderIsVisible = false;
 					offsetX = 0;
 					offsetY = 0;
-
 					foundTooltip = true;
+
+					if (debugMode) {
+						debugShapes.push_back({
+							DebugShapeType::Point,
+							bottomLeftBorderPoint.x,
+							bottomLeftBorderPoint.y,
+							bottomLeftBorderPoint.x,
+							bottomLeftBorderPoint.y,
+							RGB(255, 220, 0)
+						});
+						ostringstream foundLog;
+						foundLog << "BOTTOM_LEFT_ASSUMED|" << bottomLeftBorderPoint.x << "|" << bottomLeftBorderPoint.y;
+						debugLog(foundLog.str());
+						showDebugStep(
+							debugShapes,
+							debugText(
+								L"5. Current code assumes this is bottom-left",
+								L"5. Текущий код считает эту точку нижним левым углом"
+							)
+						);
+					}
+
 					for (short i = 0; i < std::size(horizontalCheckpoints); i++) {
 						checkRange = horizontalCheckpoints[i];
 						getBottomRightBorderPoint(bottomLeftBorderPoint.x, bottomLeftBorderPoint.y, red, green, blue, offsetX, checkRange);
+
+						if (debugMode) {
+							LONG currentRightX = bottomLeftBorderPoint.x + offsetX;
+							debugShapes.push_back({
+								DebugShapeType::Line,
+								bottomLeftBorderPoint.x,
+								bottomLeftBorderPoint.y,
+								currentRightX,
+								bottomLeftBorderPoint.y,
+								RGB(255, 170, 0)
+							});
+							ostringstream rightLog;
+							rightLog << "RIGHT_SEARCH|step=" << checkRange << "|x=" << currentRightX;
+							debugLog(rightLog.str());
+							wstringstream label;
+							label << debugText(L"Searching right border, checkpoint ", L"Поиск правой границы, шаг ") << checkRange << L" px";
+							showDebugStep(debugShapes, label.str());
+						}
 					}
 
 					bottomRightBorderPoint.x = bottomLeftBorderPoint.x + offsetX;
@@ -482,6 +825,24 @@ int main(int argc, char* argv[])
 					for (short i = 0; i < std::size(verticalCheckpoints); i++) {
 						checkRange = verticalCheckpoints[i];
 						getTopLeftBorderPoint(bottomLeftBorderPoint.x, bottomLeftBorderPoint.y, red, green, blue, offsetY, checkRange);
+
+						if (debugMode) {
+							LONG currentTopY = bottomLeftBorderPoint.y + offsetY;
+							debugShapes.push_back({
+								DebugShapeType::Line,
+								bottomLeftBorderPoint.x,
+								bottomLeftBorderPoint.y,
+								bottomLeftBorderPoint.x,
+								currentTopY,
+								RGB(255, 80, 220)
+							});
+							ostringstream topLog;
+							topLog << "TOP_SEARCH|step=" << checkRange << "|y=" << currentTopY;
+							debugLog(topLog.str());
+							wstringstream label;
+							label << debugText(L"Searching top border, checkpoint ", L"Поиск верхней границы, шаг ") << checkRange << L" px";
+							showDebugStep(debugShapes, label.str());
+						}
 					}
 
 					topLeftBorderPoint.x = bottomLeftBorderPoint.x;
@@ -490,21 +851,64 @@ int main(int argc, char* argv[])
 					width = bottomRightBorderPoint.x - bottomLeftBorderPoint.x;
 					height = bottomLeftBorderPoint.y - topLeftBorderPoint.y;
 
+					if (debugMode) {
+						debugShapes.push_back({
+							DebugShapeType::Rect,
+							topLeftBorderPoint.x + 1,
+							topLeftBorderPoint.y + 1,
+							topLeftBorderPoint.x + 1 + width,
+							topLeftBorderPoint.y + 1 + height,
+							RGB(255, 255, 255)
+						});
+						ostringstream rectLog;
+						rectLog << "OCR_RECT|" << (topLeftBorderPoint.x + 1) << "|" << (topLeftBorderPoint.y + 1) << "|" << width << "|" << height;
+						debugLog(rectLog.str());
+						wstringstream label;
+						label << debugText(L"Final OCR rectangle: ", L"Итоговая область OCR: ") << width << L" x " << height;
+						showDebugStep(debugShapes, label.str());
+					}
+
 					if (width > 10 && height > 10) {
+						// The previous debug window is already destroyed here, so the real
+						// OCR capture remains identical to normal mode.
 						scanText = scanForText(tess, topLeftBorderPoint.x + 1, topLeftBorderPoint.y + 1, width, height);
 						
 						scanText = regex_replace(scanText, regexNewlineCRLF, " ");
 						scanText = regex_replace(scanText, regexNewlineLF, " ");
 						scanText = regex_replace(scanText, regexAtSymbol, "0");
+						rtrim(scanText);
+
+						if (debugMode) {
+							debugLog(string("OCR_TEXT|") + scanText);
+							wstring recognized = utf8ToWide(scanText);
+							if (recognized.size() > 100) {
+								recognized.resize(100);
+								recognized += L"...";
+							}
+							wstring label = debugText(L"OCR recognized: ", L"OCR распознал: ") + recognized;
+							showDebugStep(debugShapes, label);
+						}
 						
 						if (scanText.length() > 3) {
 							lastScannedCursor = mousePos;
-							rtrim(scanText);
 							cout << scanText << "||" << mousePos.x << "," << mousePos.y << endl;
 							fflush(stdout);
 							showedMouseMoved = false;
 						}
 					}
+				}
+				else if (debugMode) {
+				{
+					ostringstream missLog;
+					missLog << "BORDER_NOT_FOUND|" << bottomLeftBorderPoint.x << "|" << bottomLeftBorderPoint.y;
+					debugLog(missLog.str());
+					showDebugStep(
+						debugShapes,
+						debugText(
+							L"No tooltip border found at the three current test pixels",
+							L"Рамка плашки не найдена в трёх текущих проверяемых точках"
+						)
+					);
 				}
 			}
 
