@@ -15,14 +15,14 @@ export async function setTooltipItem(item: Item | null) {
   TOOLTIP_ITEM.set(item);
 }
 
-// If the app stays open across the 24-hour boundary, immediately stop treating
-// the old snapshot as usable without waiting for another OCR result.
+// If the app stays open across the 24-hour boundary, stop displaying the old
+// snapshot essentially immediately, without waiting for another OCR result.
 setInterval(() => {
   const currentItem = TOOLTIP_ITEM.get();
   if (currentItem && !isItemPriceFresh(currentItem as Item)) {
     TOOLTIP_ITEM.set(null);
   }
-}, 60 * 1000);
+}, 1000);
 
 // @ts-expect-error
 window.electron.receive(
