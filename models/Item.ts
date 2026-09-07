@@ -22,6 +22,7 @@ type ItemPrices = {
 type TraderPrice = {
   name: string;
   price: number;
+  traderId?: string;
 };
 
 export type ItemTask = {
