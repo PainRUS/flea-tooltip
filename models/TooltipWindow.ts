@@ -1,13 +1,25 @@
 import { BrowserWindow, screen } from "electron";
+import IpcConstants from "./IpcConstants";
 
 declare const TOOLTIP_WINDOW_WEBPACK_ENTRY: string;
 declare const TOOLTIP_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
+
+type DisplayBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
 export default class TooltipWindow extends BrowserWindow {
   private layoutGeneration = 0;
   private readonly cursorGap = 13;
   private lastCursorX = 0;
   private lastCursorY = 0;
+  private renderedTooltipWidth = 500;
+  private renderedTooltipHeight = 500;
+  private activeDisplayId: number | null = null;
+  private activeDisplayBounds: DisplayBounds | null = null;
 
   constructor() {
     super({
@@ -20,6 +32,8 @@ export default class TooltipWindow extends BrowserWindow {
       backgroundColor: "#00000000",
       skipTaskbar: true,
       resizable: false,
+      focusable: false,
+      hasShadow: false,
       // The price popup is an in-game overlay and must stay above Tarkov
       // independently of the main-window "Always on top" preference.
       alwaysOnTop: true,
@@ -30,6 +44,10 @@ export default class TooltipWindow extends BrowserWindow {
 
     this.loadURL(TOOLTIP_WINDOW_WEBPACK_ENTRY);
     this.setAlwaysOnTop(true, "screen-saver");
+
+    // The stationary transparent canvas can cover an entire monitor. It must
+    // never participate in hit-testing or change the game cursor underneath.
+    this.setIgnoreMouseEvents(true);
   }
 
   public hideTooltip(): void {
@@ -43,54 +61,35 @@ export default class TooltipWindow extends BrowserWindow {
     this.lastCursorX = cursorX;
     this.lastCursorY = cursorY;
     const generation = ++this.layoutGeneration;
-    const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
-    const bounds = display.bounds;
-    const rightEdge = bounds.x + bounds.width;
-    const bottomEdge = bounds.y + bounds.height;
+    const bounds = this.ensureCanvasForCursor(cursorX, cursorY);
 
-    // First make the window visible immediately with the old safe 500x500
-    // viewport, but clamp that viewport inside the current monitor. This keeps
-    // the price card visible even if DOM measurement is late or unavailable.
-    const initialWidth = Math.min(500, bounds.width);
-    const initialHeight = Math.min(500, bounds.height);
-    let initialX = cursorX + this.cursorGap;
-    let initialY = cursorY + this.cursorGap;
-
-    initialX = Math.max(
-      bounds.x,
-      Math.min(initialX, rightEdge - initialWidth)
+    // The native BrowserWindow is now a stationary transparent canvas covering
+    // the current monitor. Only the small DOM price card moves inside it.
+    this.sendCardPosition(
+      cursorX,
+      cursorY,
+      this.renderedTooltipWidth,
+      this.renderedTooltipHeight,
+      bounds
     );
-    initialY = Math.max(
-      bounds.y,
-      Math.min(initialY, bottomEdge - initialHeight)
-    );
-
-    this.setBounds({
-      x: initialX,
-      y: initialY,
-      width: initialWidth,
-      height: initialHeight,
-    });
 
     // Do not tie overlay visibility to the main application's top-most mode.
-    // Reassert the z-order before every show because games can change their
-    // own window z-order while switching menus/fullscreen states.
+    // Reassert the z-order only when showing the overlay, never every frame.
     this.setAlwaysOnTop(true, "screen-saver");
     this.showInactive();
     this.moveTop();
 
     // React receives the item just before this call. Give it a moment to paint,
-    // then shrink the transparent window to the actual white price card and
-    // flip the card around the latest cursor position if an edge would
-    // otherwise be crossed.
+    // then measure the actual white price card so edge flipping uses its real
+    // dimensions. The BrowserWindow itself remains monitor-sized and stationary.
     setTimeout(() => {
       void this.fitRenderedTooltipToScreen(generation);
     }, 40);
   }
 
-  // This is called by a small main-process cursor-follow loop while a Tarkov
-  // item tooltip is being tracked. Only move the existing native window; do
-  // not re-measure React, rebuild the card or touch z-order on every frame.
+  // Called by the lightweight main-process cursor-follow loop. While the cursor
+  // remains on one monitor this sends only two small coordinates to the renderer;
+  // it does not move/resize the native BrowserWindow at 60 FPS.
   public moveNearCursor(cursorX: number, cursorY: number): void {
     if (this.isDestroyed()) {
       return;
@@ -98,22 +97,18 @@ export default class TooltipWindow extends BrowserWindow {
 
     this.lastCursorX = cursorX;
     this.lastCursorY = cursorY;
+    const bounds = this.ensureCanvasForCursor(cursorX, cursorY);
 
-    const currentBounds = this.getBounds();
-    const { x, y } = this.getPositionNearCursor(
+    this.sendCardPosition(
       cursorX,
       cursorY,
-      currentBounds.width,
-      currentBounds.height
+      this.renderedTooltipWidth,
+      this.renderedTooltipHeight,
+      bounds
     );
 
-    if (currentBounds.x !== x || currentBounds.y !== y) {
-      this.setPosition(x, y, false);
-    }
-
-    // Normally the window is already visible and top-most. Only reassert those
-    // properties if something external hid it, rather than doing expensive
-    // z-order work at 60 FPS.
+    // Normally the window is already visible and top-most. Only recover those
+    // properties if something external hid it.
     if (!this.isVisible()) {
       this.setAlwaysOnTop(true, "screen-saver");
       this.showInactive();
@@ -121,14 +116,69 @@ export default class TooltipWindow extends BrowserWindow {
     }
   }
 
+  private ensureCanvasForCursor(
+    cursorX: number,
+    cursorY: number
+  ): DisplayBounds {
+    const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
+    const bounds = display.bounds;
+
+    if (
+      this.activeDisplayId !== display.id ||
+      !this.activeDisplayBounds ||
+      this.activeDisplayBounds.x !== bounds.x ||
+      this.activeDisplayBounds.y !== bounds.y ||
+      this.activeDisplayBounds.width !== bounds.width ||
+      this.activeDisplayBounds.height !== bounds.height
+    ) {
+      // This is the only normal cursor-follow case that changes the native
+      // window geometry: initial placement or crossing onto another monitor.
+      this.setBounds({
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      });
+      this.activeDisplayId = display.id;
+      this.activeDisplayBounds = { ...bounds };
+    }
+
+    return bounds;
+  }
+
+  private sendCardPosition(
+    cursorX: number,
+    cursorY: number,
+    tooltipWidth: number,
+    tooltipHeight: number,
+    bounds: DisplayBounds
+  ): void {
+    if (this.webContents.isDestroyed()) {
+      return;
+    }
+
+    const { x, y } = this.getPositionNearCursor(
+      cursorX,
+      cursorY,
+      tooltipWidth,
+      tooltipHeight,
+      bounds
+    );
+
+    this.webContents.send(IpcConstants.TooltipPositionChanged, {
+      // CSS coordinates are local to the monitor-sized transparent canvas.
+      x: x - bounds.x,
+      y: y - bounds.y,
+    });
+  }
+
   private getPositionNearCursor(
     cursorX: number,
     cursorY: number,
     tooltipWidth: number,
-    tooltipHeight: number
+    tooltipHeight: number,
+    bounds: DisplayBounds
   ): { x: number; y: number } {
-    const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
-    const bounds = display.bounds;
     const rightEdge = bounds.x + bounds.width;
     const bottomEdge = bounds.y + bounds.height;
 
@@ -165,23 +215,16 @@ export default class TooltipWindow extends BrowserWindow {
     try {
       const measured = (await this.webContents.executeJavaScript(`
         (() => {
-          const root = document.getElementById("root");
-          if (!root) return null;
+          const layer = document.getElementById("tooltip-card-layer");
+          const card = layer?.firstElementChild;
+          if (!card) return null;
 
-          const rects = Array.from(root.children)
-            .map((element) => element.getBoundingClientRect())
-            .filter((rect) => rect.width > 0 && rect.height > 0);
-
-          if (rects.length === 0) return null;
-
-          const left = Math.min(...rects.map((rect) => rect.left));
-          const top = Math.min(...rects.map((rect) => rect.top));
-          const right = Math.max(...rects.map((rect) => rect.right));
-          const bottom = Math.max(...rects.map((rect) => rect.bottom));
+          const rect = card.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return null;
 
           return {
-            width: Math.ceil(right - left),
-            height: Math.ceil(bottom - top),
+            width: Math.ceil(rect.width),
+            height: Math.ceil(rect.height),
           };
         })()
       `)) as { width: number; height: number } | null;
@@ -197,36 +240,29 @@ export default class TooltipWindow extends BrowserWindow {
 
       const cursorX = this.lastCursorX;
       const cursorY = this.lastCursorY;
-      const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
-      const bounds = display.bounds;
-      const tooltipWidth = Math.max(
+      const bounds = this.ensureCanvasForCursor(cursorX, cursorY);
+
+      this.renderedTooltipWidth = Math.max(
         1,
         Math.min(Math.ceil(measured.width) + 2, bounds.width)
       );
-      const tooltipHeight = Math.max(
+      this.renderedTooltipHeight = Math.max(
         1,
         Math.min(Math.ceil(measured.height) + 2, bounds.height)
-      );
-      const { x, y } = this.getPositionNearCursor(
-        cursorX,
-        cursorY,
-        tooltipWidth,
-        tooltipHeight
       );
 
       if (generation !== this.layoutGeneration || this.isDestroyed()) {
         return;
       }
 
-      this.setBounds({
-        x,
-        y,
-        width: tooltipWidth,
-        height: tooltipHeight,
-      });
-      this.moveTop();
+      this.sendCardPosition(
+        cursorX,
+        cursorY,
+        this.renderedTooltipWidth,
+        this.renderedTooltipHeight,
+        bounds
+      );
     } catch (error) {
-      // The already-visible, clamped 500x500 fallback remains on screen.
       console.error("Failed to fit tooltip to screen:", error);
     }
   }
