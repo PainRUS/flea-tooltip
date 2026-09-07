@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - feature/russian-ui-ocr-debug
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
