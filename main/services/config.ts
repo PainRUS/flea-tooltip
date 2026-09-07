@@ -60,6 +60,9 @@ function createUserConfigFile(userDataPath: string): void {
     lastPriceUpdateAt: null,
     nextPriceUpdateAt: null,
     priceUpdateFailed: false,
+    priceColorsEnabled: true,
+    priceColorThresholds: [20000, 50000, 100000, 250000],
+    priceColors: ["#78716c", "#22c55e", "#3b82f6", "#a855f7", "#f59e0b"],
   };
 
   fs.writeFileSync(
