@@ -4,7 +4,7 @@ import PriceUpdateStatus from "../components/PriceUpdateStatus";
 
 export function Home() {
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="relative flex flex-col h-full min-h-0">
       <PriceUpdateStatus />
       <div className="flex-1 min-h-0">
         <PriceList />
