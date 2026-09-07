@@ -1,5 +1,7 @@
 # Lightweight tooltip tracking is applied after the language and right-edge
-# transforms. All checks use fresh desktop pixels, never the stale OCR cache.
+# transforms. It deliberately does not inspect tooltip contents: successful
+# OCR remains authoritative, while tracking only follows the already-known
+# rectangle geometry.
 
 set(ORIGINAL_TRACKING_STATE [=[
 	int sleepInterval = 25;
@@ -10,21 +12,20 @@ set(PATCHED_TRACKING_STATE [=[
 	int sleepInterval = 25;
 
 	bool trackingTooltip = false;
+	bool trackingMovedSinceScan = false;
 	POINT trackedBottomLeft{};
 	POINT trackedBottomRight{};
 	POINT trackedTopLeft{};
-	int trackedMissCount = 0;
-	const int trackedMissLimit = 1;
-	std::vector<unsigned char> trackedFingerprint;
-	const int fingerprintColumns = 32;
-	const int fingerprintRows = 8;
-	const int fingerprintDifferenceLimit = 10;
+	const LONG trackedWidthTolerance = 5;
+	const LONG trackedHeightTolerance = 4;
 
 	auto freshBorderPixelNear = [&](LONG x, LONG y) -> bool {
 		if (!cachedDesktopDC) return false;
 
-		for (LONG dy = -1; dy <= 1; dy++) {
-			for (LONG dx = -1; dx <= 1; dx++) {
+		// A two-pixel neighborhood keeps the cheap check tolerant of minor
+		// anti-aliasing/sub-pixel differences between rendered frames.
+		for (LONG dy = -2; dy <= 2; dy++) {
+			for (LONG dx = -2; dx <= 2; dx++) {
 				COLORREF color = GetPixel(cachedDesktopDC, x + dx, y + dy);
 				if (color == CLR_INVALID) continue;
 
@@ -39,96 +40,47 @@ set(PATCHED_TRACKING_STATE [=[
 		return false;
 	};
 
-	auto trackedRectStillVisible = [&](const POINT& bottomLeft,
+	auto trackedRectSameGeometry = [&](const POINT& bottomLeft,
 		const POINT& bottomRight,
 		const POINT& topLeft) -> bool {
 		LONG bottomCenterX = bottomLeft.x +
 			(bottomRight.x - bottomLeft.x) / 2;
 
-		bool bottomLeftOk = freshBorderPixelNear(bottomLeft.x, bottomLeft.y);
-		bool bottomCenterOk = freshBorderPixelNear(bottomCenterX, bottomLeft.y);
-		bool farEdgeOk =
-			freshBorderPixelNear(bottomRight.x, bottomRight.y) ||
-			freshBorderPixelNear(topLeft.x, topLeft.y);
+		// The known border itself must still exist.
+		if (!freshBorderPixelNear(bottomLeft.x, bottomLeft.y) ||
+			!freshBorderPixelNear(bottomCenterX, bottomLeft.y) ||
+			!freshBorderPixelNear(bottomRight.x, bottomRight.y) ||
+			!freshBorderPixelNear(topLeft.x, topLeft.y)) {
+			return false;
+		}
 
-		return bottomLeftOk && bottomCenterOk && farEdgeOk;
+		// Detect a materially larger rectangle too. Merely checking the old
+		// right/top points is insufficient because those points would still lie
+		// on a longer border. Probe just beyond the configured size tolerance.
+		bool extendsRight = freshBorderPixelNear(
+			bottomRight.x + trackedWidthTolerance + 1,
+			bottomRight.y
+		);
+		bool extendsUp = freshBorderPixelNear(
+			topLeft.x,
+			topLeft.y - trackedHeightTolerance - 1
+		);
+
+		return !extendsRight && !extendsUp;
 	};
 
-	// The border alone cannot tell two adjacent items apart because Tarkov can
-	// replace one name rectangle with another without ever showing a frame with
-	// no rectangle. Keep a tiny binary brightness fingerprint of the rectangle's
-	// interior. 32 x 8 samples are only 256 GetPixel calls per validation and do
-	// not involve screenshots, OCR or item lookup.
-	auto captureTooltipFingerprint = [&](const POINT& bottomLeft,
-		const POINT& bottomRight,
-		const POINT& topLeft) -> std::vector<unsigned char> {
-		std::vector<unsigned char> fingerprint;
-		fingerprint.reserve(fingerprintColumns * fingerprintRows);
+	auto releaseTrackedTooltip = [&](bool hidePriceImmediately) {
+		trackingTooltip = false;
+		trackingMovedSinceScan = false;
+		foundTooltip = false;
+		showedMouseMoved = false;
+		cachedPixelBuffer.pixels.clear();
+		lastScannedCursor = { 0, 0 };
 
-		LONG left = topLeft.x + 3;
-		LONG right = bottomRight.x - 3;
-		LONG top = topLeft.y + 3;
-		LONG bottom = bottomLeft.y - 3;
-		if (!cachedDesktopDC || right <= left || bottom <= top) {
-			return fingerprint;
+		if (hidePriceImmediately) {
+			cout << "TOOLTIP_LOST" << endl;
+			fflush(stdout);
 		}
-
-		for (int row = 0; row < fingerprintRows; row++) {
-			LONG y = top +
-				((row * 2 + 1) * (bottom - top)) /
-				(2 * fingerprintRows);
-
-			for (int column = 0; column < fingerprintColumns; column++) {
-				LONG x = left +
-					((column * 2 + 1) * (right - left)) /
-					(2 * fingerprintColumns);
-				COLORREF color = GetPixel(cachedDesktopDC, x, y);
-				if (color == CLR_INVALID) {
-					fingerprint.push_back(0);
-					continue;
-				}
-
-				int luminance =
-					(static_cast<int>(GetRValue(color)) * 3 +
-					 static_cast<int>(GetGValue(color)) * 6 +
-					 static_cast<int>(GetBValue(color))) / 10;
-				fingerprint.push_back(luminance >= 100 ? 1 : 0);
-			}
-		}
-
-		return fingerprint;
-	};
-
-	auto fingerprintMatches = [&](const std::vector<unsigned char>& current) -> bool {
-		if (trackedFingerprint.empty() ||
-			current.size() != trackedFingerprint.size()) {
-			return true;
-		}
-
-		int differences = 0;
-		for (size_t i = 0; i < current.size(); i++) {
-			if (current[i] != trackedFingerprint[i]) {
-				differences++;
-				if (differences > fingerprintDifferenceLimit) {
-					return false;
-				}
-			}
-		}
-		return true;
-	};
-
-	// 0 = no matching border, 1 = same tooltip, 2 = a tooltip is present but
-	// its interior changed enough to be a different item's name rectangle.
-	auto trackedCandidateState = [&](const POINT& bottomLeft,
-		const POINT& bottomRight,
-		const POINT& topLeft) -> int {
-		if (!trackedRectStillVisible(bottomLeft, bottomRight, topLeft)) {
-			return 0;
-		}
-
-		std::vector<unsigned char> currentFingerprint =
-			captureTooltipFingerprint(bottomLeft, bottomRight, topLeft);
-		return fingerprintMatches(currentFingerprint) ? 1 : 2;
 	};
 
 	while (true) {
@@ -140,11 +92,11 @@ endif()
 string(REPLACE "${ORIGINAL_TRACKING_STATE}" "${PATCHED_TRACKING_STATE}"
   OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
-# Keep validating the cached border even after the cursor stops. While a
-# tooltip is tracked the loop runs at about 60 Hz. Both disappearance and a
-# content swap invalidate the cached price through the existing TOOLTIP_LOST
-# event, so Electron can hide the stale price immediately without a new IPC
-# protocol path.
+# While the cursor is stationary, keep validating geometry. If the cursor moved
+# since the last successful OCR but the rectangle retained the same dimensions,
+# allow exactly one normal OCR pass after a short stop. This covers the rare
+# case of two adjacent items whose name rectangles happen to have the same size,
+# without running OCR for every mouse pixel.
 set(ORIGINAL_STATIONARY_BLOCK [=[
 			if (
 				lastValidMousePos.x == mousePos.x &&
@@ -163,28 +115,23 @@ set(PATCHED_STATIONARY_BLOCK [=[
 				sleepInterval = trackingTooltip ? 16 : 25;
 
 				if (trackingTooltip) {
-					int trackedState = trackedCandidateState(
+					if (!trackedRectSameGeometry(
 						trackedBottomLeft,
 						trackedBottomRight,
 						trackedTopLeft
-					);
-
-					if (trackedState == 1) {
-						trackedMissCount = 0;
+					)) {
+						// The old rectangle disappeared or materially changed size.
+						// Hide the stale price now and make the existing scanner run
+						// immediately on the current cursor position below.
+						releaseTrackedTooltip(true);
+						mouseStationaryCount = 3;
 					}
-					else {
-						if (trackedState == 2 && debugMode) {
-							debugLog("TOOLTIP_CHANGED");
-						}
-						trackingTooltip = false;
-						trackedMissCount = 0;
-						foundTooltip = false;
-						showedMouseMoved = false;
-						trackedFingerprint.clear();
-						cachedPixelBuffer.pixels.clear();
-						lastScannedCursor = { 0, 0 };
-						cout << "TOOLTIP_LOST" << endl;
-						fflush(stdout);
+					else if (trackingMovedSinceScan && mouseStationaryCount > 3) {
+						// Same geometry after movement: perform one ordinary OCR pass
+						// to catch a different item with an equal-sized tooltip. Keep
+						// the current price visible until that normal OCR result arrives.
+						releaseTrackedTooltip(false);
+						mouseStationaryCount = 3;
 					}
 				}
 			}
@@ -218,19 +165,17 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 
 				if (trackingTooltip) {
 					sleepInterval = 16;
-					bool sawChangedTooltip = false;
 
 					POINT candidateBottomLeft = trackedBottomLeft;
 					POINT candidateBottomRight = trackedBottomRight;
 					POINT candidateTopLeft = trackedTopLeft;
-					int candidateState = trackedCandidateState(
+					bool trackedVisible = trackedRectSameGeometry(
 						candidateBottomLeft,
 						candidateBottomRight,
 						candidateTopLeft
 					);
-					bool trackedVisible = candidateState == 1;
-					sawChangedTooltip = candidateState == 2;
 
+					// Normally the Tarkov tooltip translates with the cursor.
 					if (!trackedVisible) {
 						candidateBottomLeft = {
 							trackedBottomLeft.x + cursorDeltaX,
@@ -244,15 +189,16 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 							trackedTopLeft.x + cursorDeltaX,
 							trackedTopLeft.y + cursorDeltaY
 						};
-						candidateState = trackedCandidateState(
+						trackedVisible = trackedRectSameGeometry(
 							candidateBottomLeft,
 							candidateBottomRight,
 							candidateTopLeft
 						);
-						trackedVisible = candidateState == 1;
-						sawChangedTooltip = sawChangedTooltip || candidateState == 2;
 					}
 
+					// At a monitor edge Tarkov can clamp its tooltip while the cursor
+					// continues moving. Check that clamped geometry as the last cheap
+					// candidate before falling back to the original scanner.
 					if (!trackedVisible) {
 						LONG tooltipWidth = trackedBottomRight.x - trackedBottomLeft.x;
 						LONG tooltipHeight = trackedBottomLeft.y - trackedTopLeft.y;
@@ -293,15 +239,13 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 							};
 							candidateTopLeft = {
 								translatedTopLeft.x + clampShiftX,
-								translatedTopLeft.y + clampShiftY
+								translatedTopLeft.y + cursorDeltaY + clampShiftY
 							};
-							candidateState = trackedCandidateState(
+							trackedVisible = trackedRectSameGeometry(
 								candidateBottomLeft,
 								candidateBottomRight,
 								candidateTopLeft
 							);
-							trackedVisible = candidateState == 1;
-							sawChangedTooltip = sawChangedTooltip || candidateState == 2;
 						}
 					}
 
@@ -309,22 +253,15 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						trackedBottomLeft = candidateBottomLeft;
 						trackedBottomRight = candidateBottomRight;
 						trackedTopLeft = candidateTopLeft;
-						trackedMissCount = 0;
+						trackingMovedSinceScan = true;
 						foundTooltip = true;
 					}
 					else {
-						if (sawChangedTooltip && debugMode) {
-							debugLog("TOOLTIP_CHANGED");
-						}
-						trackingTooltip = false;
-						trackedMissCount = 0;
-						foundTooltip = false;
-						showedMouseMoved = false;
-						trackedFingerprint.clear();
-						cachedPixelBuffer.pixels.clear();
-						lastScannedCursor = { 0, 0 };
-						cout << "TOOLTIP_LOST" << endl;
-						fflush(stdout);
+						// Different geometry (or disappearance): hide the stale price,
+						// then immediately hand control back to the original proven
+						// border -> OCR -> item path in this same loop iteration.
+						releaseTrackedTooltip(true);
+						mouseStationaryCount = 3;
 					}
 				}
 				else {
@@ -356,15 +293,10 @@ set(ORIGINAL_OCR_SUCCESS [=[
 set(PATCHED_OCR_SUCCESS [=[
 						if (scanText.length() > 3) {
 							trackingTooltip = true;
+							trackingMovedSinceScan = false;
 							trackedBottomLeft = bottomLeftBorderPoint;
 							trackedBottomRight = bottomRightBorderPoint;
 							trackedTopLeft = topLeftBorderPoint;
-							trackedFingerprint = captureTooltipFingerprint(
-								trackedBottomLeft,
-								trackedBottomRight,
-								trackedTopLeft
-							);
-							trackedMissCount = 0;
 							lastScannedCursor = mousePos;
 							cout << scanText << "||" <<
 								mousePos.x << "," << mousePos.y << endl;
