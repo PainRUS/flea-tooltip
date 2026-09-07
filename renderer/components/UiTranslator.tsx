@@ -5,9 +5,9 @@ const russianText: Record<string, string> = {
   "Please press F6 to start the screen scanning configuration process. This is a simple 30 second process to calibrate the OCR for your screen.":
     "Нажмите F6, чтобы запустить калибровку распознавания экрана. Обычно это занимает около 30 секунд.",
   "Fetching Item Prices from Database": "Загрузка цен предметов",
-  "Fetching Items from Database Failed": "Не удалось загрузить базу предметов",
+  "Fetching Items from Database Failed": "Не удалось обновить цены",
   "Please try restarting the application and trying again or try again later.":
-    "Перезапустите приложение и попробуйте снова или повторите попытку позже.",
+    "Не удалось получить актуальные цены. Перезапустите приложение или попробуйте снова позже.",
   "Screen Configuration Initializing": "Инициализация калибровки экрана",
   "Screen Configuration Started": "Калибровка экрана запущена",
   "Please hover over any item with the item's tooltip visible as shown below then press F6.":
