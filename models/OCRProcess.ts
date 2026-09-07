@@ -30,6 +30,8 @@ export default class OCRProcess {
   protected language: AppLanguage = "en";
   protected stdoutBuffer = "";
   protected hasTrackedTooltipItem = false;
+  protected tooltipFollowTimer: ReturnType<typeof setInterval> | null = null;
+  protected lastFollowCursor: { x: number; y: number } | null = null;
 
   public setPriceListWindow(priceListWindow: BrowserWindow): void {
     this.priceListWindow = priceListWindow;
@@ -144,7 +146,8 @@ export default class OCRProcess {
       isDev() ? console.log("stderr: " + data) : log.error("stderr: " + data);
     });
 
-    ocrProcess.on("close", function (code) {
+    ocrProcess.on("close", (code) => {
+      this.stopTooltipFollow();
       isDev()
         ? console.log("closing code: " + code)
         : log.info("closing code: " + code);
@@ -167,25 +170,60 @@ export default class OCRProcess {
     }
   }
 
-  protected hideTrackedTooltip(): void {
-    this.hasTrackedTooltipItem = false;
-    if (!this.tooltipWindow) {
-      return;
+  protected stopTooltipFollow(): void {
+    if (this.tooltipFollowTimer) {
+      clearInterval(this.tooltipFollowTimer);
+      this.tooltipFollowTimer = null;
     }
-
-    this.tooltipWindow.webContents.send(IpcConstants.NewTooltipItem, null);
-    setTimeout(() => {
-      this.tooltipWindow?.hideTooltip();
-    }, 30);
+    this.lastFollowCursor = null;
   }
 
-  protected moveTrackedTooltip(physicalX: number, physicalY: number): void {
-    if (!this.hasTrackedTooltipItem || !this.tooltipWindow) {
+  protected startTooltipFollow(): void {
+    this.stopTooltipFollow();
+
+    const followCursor = () => {
+      if (
+        !this.hasTrackedTooltipItem ||
+        !this.tooltipWindow ||
+        this.tooltipWindow.isDestroyed()
+      ) {
+        this.stopTooltipFollow();
+        return;
+      }
+
+      // Electron already returns logical/DIP coordinates here, exactly what
+      // BrowserWindow positioning expects. This path does no OCR, screenshots
+      // or DOM work; it only moves the existing native window when X/Y changed.
+      const cursor = screen.getCursorScreenPoint();
+      if (
+        !this.lastFollowCursor ||
+        cursor.x !== this.lastFollowCursor.x ||
+        cursor.y !== this.lastFollowCursor.y
+      ) {
+        this.lastFollowCursor = cursor;
+        this.tooltipWindow.moveNearCursor(cursor.x, cursor.y);
+      }
+    };
+
+    followCursor();
+    this.tooltipFollowTimer = setInterval(followCursor, 16);
+  }
+
+  protected hideTrackedTooltip(): void {
+    this.stopTooltipFollow();
+    this.hasTrackedTooltipItem = false;
+
+    if (!this.tooltipWindow || this.tooltipWindow.isDestroyed()) {
       return;
     }
 
-    const logicalPos = this.getLogicalPosition(physicalX, physicalY);
-    this.tooltipWindow.moveNearCursor(logicalPos.x, logicalPos.y);
+    if (!this.tooltipWindow.webContents.isDestroyed()) {
+      this.tooltipWindow.webContents.send(IpcConstants.NewTooltipItem, null);
+    }
+
+    // Native tracking already confirmed that Tarkov's name rectangle vanished,
+    // so there is no reason to keep the price card around for another 30 ms.
+    this.tooltipWindow.hideTooltip();
   }
 
   onNewData(data: any): void {
@@ -213,14 +251,8 @@ export default class OCRProcess {
       }
 
       if (incomingData.startsWith("TRACKMOVE|")) {
-        const parts = incomingData.split("|");
-        if (parts.length >= 3) {
-          const x = parseInt(parts[1]);
-          const y = parseInt(parts[2]);
-          if (Number.isFinite(x) && Number.isFinite(y)) {
-            this.moveTrackedTooltip(x, y);
-          }
-        }
+        // Legacy/native tracking messages are intentionally ignored for visual
+        // movement. The Electron 60 FPS cursor loop owns price-window motion.
         return;
       }
 
@@ -341,14 +373,19 @@ export default class OCRProcess {
                 item
               );
               setTimeout(() => {
+                if (!this.hasTrackedTooltipItem || !this.tooltipWindow) {
+                  return;
+                }
+
                 const logicalPos = this.getLogicalPosition(
                   mousePos.x,
                   mousePos.y
                 );
-                this.tooltipWindow?.showNearCursor(
+                this.tooltipWindow.showNearCursor(
                   logicalPos.x,
                   logicalPos.y
                 );
+                this.startTooltipFollow();
               }, 5);
             }
           }
