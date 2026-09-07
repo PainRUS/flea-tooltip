@@ -30,4 +30,9 @@ export type UserConfig = {
   lastPriceUpdateAt?: number | null;
   nextPriceUpdateAt?: number | null;
   priceUpdateFailed?: boolean;
+  priceColorsEnabled?: boolean;
+  // Four ascending RUB-per-slot boundaries split prices into five color bands.
+  priceColorThresholds?: number[];
+  // Five #RRGGBB colors, from the cheapest band to the most expensive.
+  priceColors?: string[];
 };
