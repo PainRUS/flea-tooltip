@@ -14,7 +14,7 @@ set(PATCHED_TRACKING_STATE [=[
 	POINT trackedBottomRight{};
 	POINT trackedTopLeft{};
 	int trackedMissCount = 0;
-	const int trackedMissLimit = 3;
+	const int trackedMissLimit = 1;
 
 	auto freshBorderPixelNear = [&](LONG x, LONG y) -> bool {
 		if (!cachedDesktopDC) return false;
@@ -59,10 +59,9 @@ endif()
 string(REPLACE "${ORIGINAL_TRACKING_STATE}" "${PATCHED_TRACKING_STATE}"
   OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
-# A very quick move can end after only one or two failed moving checks. Keep
-# validating the cached border while the cursor is stationary so a tooltip that
-# disappeared during that move is always released and the normal OCR path can
-# run on the new stopped position.
+# Keep validating the cached border even after the cursor stops. While a
+# tooltip is tracked the loop runs at about 60 Hz; the first failed validation
+# means Tarkov's name rectangle is gone and the cached price must disappear.
 set(ORIGINAL_STATIONARY_BLOCK [=[
 			if (
 				lastValidMousePos.x == mousePos.x &&
@@ -78,7 +77,7 @@ set(PATCHED_STATIONARY_BLOCK [=[
 				lastValidMousePos.y == mousePos.y
 			) {
 				mouseStationaryCount++;
-				sleepInterval = 25;
+				sleepInterval = trackingTooltip ? 16 : 25;
 
 				if (trackingTooltip) {
 					if (trackedRectStillVisible(
@@ -129,9 +128,7 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 				mouseStationaryCount = 0;
 
 				if (trackingTooltip) {
-					sleepInterval = 25;
-					cout << "TRACKMOVE|" << mousePos.x << "|" << mousePos.y << endl;
-					fflush(stdout);
+					sleepInterval = 16;
 
 					POINT candidateBottomLeft = trackedBottomLeft;
 					POINT candidateBottomRight = trackedBottomRight;
