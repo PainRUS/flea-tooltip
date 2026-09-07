@@ -1,12 +1,6 @@
-# Lightweight tooltip tracking is applied to the generated scanner source after
-# the language and right-edge geometry patches in CMakeLists.txt. Keeping it as
-# a separate guarded transform makes the behavior easy to remove or adjust
-# without touching the upstream-oriented ocr_cpp.cpp file.
+# Lightweight tooltip tracking is applied after the language and right-edge
+# transforms. All checks use fresh desktop pixels, never the stale OCR cache.
 
-# Add tracking state and cheap fresh-screen border checks. These checks use
-# GetPixel directly on purpose: the normal 600x300 cache is a snapshot from the
-# last OCR scan and must not be used to decide whether a moving tooltip still
-# exists.
 set(ORIGINAL_TRACKING_STATE [=[
 	int sleepInterval = 25;
 
@@ -16,16 +10,12 @@ set(PATCHED_TRACKING_STATE [=[
 	int sleepInterval = 25;
 
 	bool trackingTooltip = false;
-	POINT trackedMousePos{};
 	POINT trackedBottomLeft{};
 	POINT trackedBottomRight{};
 	POINT trackedTopLeft{};
 	int trackedMissCount = 0;
 	const int trackedMissLimit = 3;
 
-	// Check a 3x3 neighborhood against the configured Tarkov tooltip border
-	// color. A tiny tolerance makes tracking insensitive to one-pixel rounding
-	// while remaining far cheaper than a new capture/OCR pass.
 	auto freshBorderPixelNear = [&](LONG x, LONG y) -> bool {
 		if (!cachedDesktopDC) return false;
 
@@ -42,13 +32,9 @@ set(PATCHED_TRACKING_STATE [=[
 				}
 			}
 		}
-
 		return false;
 	};
 
-	// The exact tooltip rectangle is already known after OCR. Tracking only
-	// samples a few points on that border; no screenshot, Tesseract call or item
-	// search is performed here.
 	auto trackedRectStillVisible = [&](const POINT& bottomLeft,
 		const POINT& bottomRight,
 		const POINT& topLeft) -> bool {
@@ -66,26 +52,13 @@ set(PATCHED_TRACKING_STATE [=[
 
 	while (true) {
 ]=])
-string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_TRACKING_STATE}" OCR_TRACKING_STATE_POS)
-if(OCR_TRACKING_STATE_POS EQUAL -1)
+string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_TRACKING_STATE}" TRACKING_STATE_POS)
+if(TRACKING_STATE_POS EQUAL -1)
   message(FATAL_ERROR "Expected OCR tracking state insertion point was not found")
 endif()
-string(REPLACE
-  "${ORIGINAL_TRACKING_STATE}"
-  "${PATCHED_TRACKING_STATE}"
-  OCR_SOURCE_CONTENT
-  "${OCR_SOURCE_CONTENT}"
-)
+string(REPLACE "${ORIGINAL_TRACKING_STATE}" "${PATCHED_TRACKING_STATE}"
+  OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
-# While a successfully scanned Tarkov name tooltip is being tracked, mouse
-# movement must not reset foundTooltip or lastScannedCursor. Instead emit the
-# new cursor coordinates so Electron can move its price card and cheaply test
-# three candidate positions for the same game tooltip:
-#   1) unchanged (Tarkov can pin it against a screen edge),
-#   2) translated by the cursor delta,
-#   3) translated then clamped inside the current monitor.
-# Three consecutive misses are required before declaring the tooltip gone, so
-# a single game-frame delay cannot cause a needless OCR rescan.
 set(ORIGINAL_MOUSE_MOVED_BLOCK [=[
 			else {
 				if (!showedMouseMoved) {
@@ -108,7 +81,6 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 
 				if (trackingTooltip) {
 					sleepInterval = 25;
-
 					cout << "TRACKMOVE|" << mousePos.x << "|" << mousePos.y << endl;
 					fflush(stdout);
 
@@ -121,7 +93,6 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						candidateTopLeft
 					);
 
-					// Normally the game tooltip follows the cursor by the same delta.
 					if (!trackedVisible) {
 						candidateBottomLeft.x += cursorDeltaX;
 						candidateBottomLeft.y += cursorDeltaY;
@@ -129,7 +100,6 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						candidateBottomRight.y += cursorDeltaY;
 						candidateTopLeft.x += cursorDeltaX;
 						candidateTopLeft.y += cursorDeltaY;
-
 						trackedVisible = trackedRectStillVisible(
 							candidateBottomLeft,
 							candidateBottomRight,
@@ -137,13 +107,9 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						);
 					}
 
-					// At a monitor edge Tarkov can clamp the name tooltip while the
-					// cursor keeps moving. Test the translated rectangle after applying
-					// the same geometric clamp, without making assumptions about item size.
 					if (!trackedVisible) {
 						LONG tooltipWidth = trackedBottomRight.x - trackedBottomLeft.x;
 						LONG tooltipHeight = trackedBottomLeft.y - trackedTopLeft.y;
-
 						POINT translatedBottomLeft = {
 							trackedBottomLeft.x + cursorDeltaX,
 							trackedBottomLeft.y + cursorDeltaY
@@ -183,7 +149,6 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 								translatedTopLeft.x + clampShiftX,
 								translatedTopLeft.y + clampShiftY
 							};
-
 							trackedVisible = trackedRectStillVisible(
 								candidateBottomLeft,
 								candidateBottomRight,
@@ -196,23 +161,18 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						trackedBottomLeft = candidateBottomLeft;
 						trackedBottomRight = candidateBottomRight;
 						trackedTopLeft = candidateTopLeft;
-						trackedMousePos = mousePos;
 						trackedMissCount = 0;
 						foundTooltip = true;
 					}
-					else {
-						trackedMissCount++;
-						if (trackedMissCount >= trackedMissLimit) {
-							trackingTooltip = false;
-							trackedMissCount = 0;
-							foundTooltip = false;
-							showedMouseMoved = false;
-							cachedPixelBuffer.pixels.clear();
-							lastScannedCursor = { 0, 0 };
-
-							cout << "TOOLTIP_LOST" << endl;
-							fflush(stdout);
-						}
+					else if (++trackedMissCount >= trackedMissLimit) {
+						trackingTooltip = false;
+						trackedMissCount = 0;
+						foundTooltip = false;
+						showedMouseMoved = false;
+						cachedPixelBuffer.pixels.clear();
+						lastScannedCursor = { 0, 0 };
+						cout << "TOOLTIP_LOST" << endl;
+						fflush(stdout);
 					}
 				}
 				else {
@@ -228,43 +188,33 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 				}
 			}
 ]=])
-string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_MOUSE_MOVED_BLOCK}" OCR_MOUSE_MOVED_BLOCK_POS)
-if(OCR_MOUSE_MOVED_BLOCK_POS EQUAL -1)
+string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_MOUSE_MOVED_BLOCK}" TRACKING_MOVE_POS)
+if(TRACKING_MOVE_POS EQUAL -1)
   message(FATAL_ERROR "Expected OCR mouse-movement block was not found")
 endif()
-string(REPLACE
-  "${ORIGINAL_MOUSE_MOVED_BLOCK}"
-  "${PATCHED_MOUSE_MOVED_BLOCK}"
-  OCR_SOURCE_CONTENT
-  "${OCR_SOURCE_CONTENT}"
-)
+string(REPLACE "${ORIGINAL_MOUSE_MOVED_BLOCK}" "${PATCHED_MOUSE_MOVED_BLOCK}"
+  OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
-# Once OCR has produced a usable name, remember the exact game-tooltip border
-# that produced it. Subsequent cursor movement can now stay in the cheap
-# tracking path until this border disappears.
 set(ORIGINAL_OCR_SUCCESS [=[
-							if (scanText.length() > 3) {
-								lastScannedCursor = mousePos;
-								cout << scanText << "||" << mousePos.x << "," << mousePos.y << endl;
+						if (scanText.length() > 3) {
+							lastScannedCursor = mousePos;
+							cout << scanText << "||" <<
+								mousePos.x << "," << mousePos.y << endl;
 ]=])
 set(PATCHED_OCR_SUCCESS [=[
-							if (scanText.length() > 3) {
-								trackingTooltip = true;
-								trackedMousePos = mousePos;
-								trackedBottomLeft = bottomLeftBorderPoint;
-								trackedBottomRight = bottomRightBorderPoint;
-								trackedTopLeft = topLeftBorderPoint;
-								trackedMissCount = 0;
-								lastScannedCursor = mousePos;
-								cout << scanText << "||" << mousePos.x << "," << mousePos.y << endl;
+						if (scanText.length() > 3) {
+							trackingTooltip = true;
+							trackedBottomLeft = bottomLeftBorderPoint;
+							trackedBottomRight = bottomRightBorderPoint;
+							trackedTopLeft = topLeftBorderPoint;
+							trackedMissCount = 0;
+							lastScannedCursor = mousePos;
+							cout << scanText << "||" <<
+								mousePos.x << "," << mousePos.y << endl;
 ]=])
-string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_OCR_SUCCESS}" OCR_SUCCESS_TRACKING_POS)
-if(OCR_SUCCESS_TRACKING_POS EQUAL -1)
+string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_OCR_SUCCESS}" TRACKING_SUCCESS_POS)
+if(TRACKING_SUCCESS_POS EQUAL -1)
   message(FATAL_ERROR "Expected OCR success block was not found for tooltip tracking")
 endif()
-string(REPLACE
-  "${ORIGINAL_OCR_SUCCESS}"
-  "${PATCHED_OCR_SUCCESS}"
-  OCR_SOURCE_CONTENT
-  "${OCR_SOURCE_CONTENT}"
-)
+string(REPLACE "${ORIGINAL_OCR_SUCCESS}" "${PATCHED_OCR_SUCCESS}"
+  OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
