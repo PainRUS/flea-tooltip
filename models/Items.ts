@@ -2,15 +2,177 @@ import Item, { ItemTask } from "./Item";
 import MiniSearch, { SearchResult } from "minisearch";
 import TarkovMarketItem from "./TarkovMarketItem";
 import { AppLanguage } from "./UserConfig";
-import { getUserConfigData } from "../main/services/config";
+import {
+  getUserConfigData,
+  setUserConfigData,
+} from "../main/services/config";
+import {
+  isPriceCacheFresh,
+  loadPriceCache,
+  PRICE_MAX_AGE_MS,
+  PRICE_REFRESH_INTERVAL_MS,
+  savePriceCache,
+} from "../main/services/priceCache";
 
 export default class Items {
   items: Item[];
   searchIndex: MiniSearch;
   private activeLanguage: AppLanguage = "en";
+  private activePveMode = false;
+  private priceRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private lastNetworkAttemptAt = 0;
+  private refreshInFlight: Promise<void> | null = null;
+  private readonly duplicateRefreshCooldownMs = 30 * 1000;
 
   constructor() {
     this.items = [];
+  }
+
+  private updatePriceRefreshStatus(
+    lastPriceUpdateAt: number | null,
+    nextPriceUpdateAt: number | null,
+    priceUpdateFailed: boolean
+  ): void {
+    try {
+      const config = getUserConfigData();
+      config.lastPriceUpdateAt = lastPriceUpdateAt;
+      config.nextPriceUpdateAt = nextPriceUpdateAt;
+      config.priceUpdateFailed = priceUpdateFailed;
+      setUserConfigData(config);
+    } catch (error) {
+      console.warn("Failed to persist price refresh status:", error);
+    }
+  }
+
+  private getLastPriceUpdateAt(): number | null {
+    const itemTimestamp = this.items[0]?.prices?.updatedAt;
+    if (typeof itemTimestamp === "number" && itemTimestamp > 0) {
+      return itemTimestamp;
+    }
+
+    try {
+      const configTimestamp = getUserConfigData().lastPriceUpdateAt;
+      return typeof configTimestamp === "number" ? configTimestamp : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private ensurePriceRefreshTimer(): void {
+    if (this.priceRefreshTimer) {
+      return;
+    }
+
+    this.priceRefreshTimer = setInterval(() => {
+      const config = getUserConfigData();
+      void this.fetchItems(
+        config.tarkovMarketApiKey,
+        config.usePveMode,
+        config.language
+      ).catch((error) => {
+        console.error("Scheduled price refresh failed:", error);
+      });
+    }, PRICE_REFRESH_INTERVAL_MS);
+  }
+
+  private stampPriceSnapshot(items: Item[], updatedAt: number): void {
+    for (const item of items) {
+      if (item?.prices) {
+        item.prices.updatedAt = updatedAt;
+      }
+    }
+  }
+
+  private commitFreshItems(
+    freshItems: Item[],
+    updatedAt: number,
+    usePveMode: boolean,
+    language: AppLanguage,
+    sameCatalog: boolean
+  ): void {
+    this.stampPriceSnapshot(freshItems, updatedAt);
+
+    if (sameCatalog && this.itemsAreLoaded()) {
+      const existingById = new Map(
+        this.items.map((item) => [item.id, item] as const)
+      );
+
+      this.items = freshItems.map((freshItem) => {
+        const existingItem = existingById.get(freshItem.id);
+        if (!existingItem) {
+          return freshItem;
+        }
+
+        // Preserve the price object reference so already scanned ClientItems in
+        // the main window immediately see refreshed prices as well.
+        const existingPrices = existingItem.prices;
+        Object.assign(existingItem, freshItem);
+        Object.assign(existingPrices, freshItem.prices);
+        existingItem.prices = existingPrices;
+        return existingItem;
+      });
+    } else {
+      this.items = freshItems;
+    }
+
+    this.activeLanguage = language;
+    this.activePveMode = usePveMode;
+
+    savePriceCache(this.items, updatedAt, usePveMode, language);
+    this.updatePriceRefreshStatus(
+      updatedAt,
+      Date.now() + PRICE_REFRESH_INTERVAL_MS,
+      false
+    );
+    this.ensurePriceRefreshTimer();
+  }
+
+  private handleRefreshFailure(
+    usePveMode: boolean,
+    language: AppLanguage
+  ): boolean {
+    const now = Date.now();
+    const currentCatalogMatches =
+      this.itemsAreLoaded() &&
+      this.activePveMode === usePveMode &&
+      this.activeLanguage === language;
+
+    if (!currentCatalogMatches) {
+      const cache = loadPriceCache(usePveMode, language);
+      if (cache && isPriceCacheFresh(cache, now)) {
+        this.stampPriceSnapshot(cache.items, cache.updatedAt);
+        this.items = cache.items;
+        this.activeLanguage = language;
+        this.activePveMode = usePveMode;
+        this.updatePriceRefreshStatus(
+          cache.updatedAt,
+          now + PRICE_REFRESH_INTERVAL_MS,
+          false
+        );
+        this.ensurePriceRefreshTimer();
+        console.warn(
+          `Using cached price snapshot from ${new Date(cache.updatedAt).toISOString()}`
+        );
+        return true;
+      }
+
+      this.updatePriceRefreshStatus(cache?.updatedAt ?? null, null, true);
+      return false;
+    }
+
+    const lastPriceUpdateAt = this.getLastPriceUpdateAt();
+    const priceUpdateFailed =
+      !lastPriceUpdateAt || now - lastPriceUpdateAt >= PRICE_MAX_AGE_MS;
+
+    // Keep the last successful snapshot in memory. Its per-item timestamp makes
+    // it automatically invalid once it reaches the 24 hour limit.
+    this.updatePriceRefreshStatus(
+      lastPriceUpdateAt,
+      now + PRICE_REFRESH_INTERVAL_MS,
+      priceUpdateFailed
+    );
+    this.ensurePriceRefreshTimer();
+    return true;
   }
 
   async fetchItems(
@@ -20,10 +182,52 @@ export default class Items {
   ): Promise<void> {
     const selectedLanguage: AppLanguage =
       language ?? getUserConfigData().language ?? "en";
-    this.activeLanguage = selectedLanguage;
-    const tarkovMarketApiKey = apiKey || "";
+    const selectedPveMode = !!usePveMode;
+    const sameCatalog =
+      this.itemsAreLoaded() &&
+      this.activeLanguage === selectedLanguage &&
+      this.activePveMode === selectedPveMode;
 
-    this.items = [];
+    // The original main process still has a legacy 15-minute refresh timer.
+    // Our 5-minute timer aligns with it, so suppress duplicate requests that
+    // land within the same short window.
+    if (
+      sameCatalog &&
+      this.lastNetworkAttemptAt > 0 &&
+      Date.now() - this.lastNetworkAttemptAt < this.duplicateRefreshCooldownMs
+    ) {
+      return;
+    }
+
+    if (this.refreshInFlight) {
+      return this.refreshInFlight;
+    }
+
+    this.refreshInFlight = this.fetchItemsInternal(
+      apiKey,
+      selectedPveMode,
+      selectedLanguage,
+      sameCatalog
+    );
+
+    try {
+      await this.refreshInFlight;
+    } finally {
+      this.refreshInFlight = null;
+    }
+  }
+
+  private async fetchItemsInternal(
+    apiKey: string | undefined,
+    usePveMode: boolean,
+    selectedLanguage: AppLanguage,
+    sameCatalog: boolean
+  ): Promise<void> {
+    const tarkovMarketApiKey = apiKey || "";
+    this.lastNetworkAttemptAt = Date.now();
+
+    let freshItems: Item[] | null = null;
+    let lastError: unknown = null;
 
     try {
       // Tarkov Market returns English names. In Russian mode use Tarkov.dev so
@@ -49,18 +253,20 @@ export default class Items {
         }
 
         const data: TarkovMarketItem[] = await res.json();
-        const formattedData: Item[] = data.map((item: TarkovMarketItem) => ({
+        freshItems = data.map((item: TarkovMarketItem) => ({
           id: item.uid,
           name: item.name,
           shortName: item.shortName,
           searchName: item.name,
           searchShortName: item.shortName,
-          availableOnFleaMarket: !item.bannedOnFlea,
+          availableOnFleaMarket:
+            !item.bannedOnFlea && (item.avg24hPrice || 0) > 0,
           slots: item.slots,
           prices: {
-            latest: item.price,
-            avgDay: item.avg24hPrice,
-            avgWeek: item.avg7daysPrice,
+            // avg24hPrice is the single authoritative flea value.
+            latest: item.avg24hPrice || 0,
+            avgDay: item.avg24hPrice || 0,
+            avgWeek: item.avg24hPrice || 0,
             trader: {
               name: item.traderName,
               price: item.traderPriceRub,
@@ -69,8 +275,6 @@ export default class Items {
           tasks: [] as ItemTask[],
           icon: item.icon,
         }));
-
-        this.items = formattedData;
       } else {
         if (
           tarkovMarketApiKey.trim() !== "" &&
@@ -85,39 +289,55 @@ export default class Items {
           );
         }
 
-        const itemsFromApi = await this.getItemsPromise(
-          usePveMode,
-          selectedLanguage
-        );
-        console.log(itemsFromApi.length + " items fetched from API");
-        this.items = itemsFromApi;
+        freshItems = await this.getItemsPromise(usePveMode, selectedLanguage);
+        console.log(freshItems.length + " items fetched from API");
       }
     } catch (error) {
+      lastError = error;
       console.error("Failed to fetch items:", error);
 
+      // Preserve the old keyed English fallback to Tarkov.dev.
       if (
-        tarkovMarketApiKey.trim() === "" ||
-        selectedLanguage === "ru"
+        tarkovMarketApiKey.trim() !== "" &&
+        selectedLanguage === "en"
       ) {
-        throw new Error("Failed to fetch items from API");
-      }
-
-      try {
-        console.log("Falling back to Tarkov.dev JSON API");
-        const itemsFromApi = await this.getItemsPromise(
-          usePveMode,
-          selectedLanguage
-        );
-        console.log(itemsFromApi.length + " items fetched from API");
-        this.items = itemsFromApi;
-      } catch (fallbackError) {
-        console.error(
-          "Failed to fetch items from Tarkov.dev API:",
-          fallbackError
-        );
-        throw new Error("Failed to fetch items from API");
+        try {
+          console.log("Falling back to Tarkov.dev JSON API");
+          freshItems = await this.getItemsPromise(
+            usePveMode,
+            selectedLanguage
+          );
+          console.log(freshItems.length + " items fetched from API");
+        } catch (fallbackError) {
+          lastError = fallbackError;
+          console.error(
+            "Failed to fetch items from Tarkov.dev API:",
+            fallbackError
+          );
+        }
       }
     }
+
+    if (!freshItems || freshItems.length === 0) {
+      if (this.handleRefreshFailure(usePveMode, selectedLanguage)) {
+        return;
+      }
+
+      throw new Error(
+        `Failed to fetch items from API${
+          lastError instanceof Error ? `: ${lastError.message}` : ""
+        }`
+      );
+    }
+
+    const updatedAt = Date.now();
+    this.commitFreshItems(
+      freshItems,
+      updatedAt,
+      usePveMode,
+      selectedLanguage,
+      sameCatalog
+    );
   }
 
   async getItemsPromise(
@@ -218,8 +438,6 @@ export default class Items {
       : Object.keys(itemMap).map((id) => itemMap[id]);
 
     const formattedData: Item[] = itemData.map((item: any) => {
-      const lastLowPrice =
-        typeof item.lastLowPrice === "number" ? item.lastLowPrice : 0;
       const avg24hPrice =
         typeof item.avg24hPrice === "number" ? item.avg24hPrice : 0;
       const types = Array.isArray(item.types) ? item.types : [];
@@ -260,12 +478,13 @@ export default class Items {
         searchName: selectedName,
         searchShortName: selectedShortName,
         availableOnFleaMarket:
-          !types.includes("noFlea") &&
-          (lastLowPrice > 0 || avg24hPrice > 0),
+          !types.includes("noFlea") && avg24hPrice > 0,
         prices: {
-          latest: lastLowPrice || avg24hPrice,
-          avgDay: avg24hPrice || lastLowPrice,
-          avgWeek: avg24hPrice || lastLowPrice,
+          // avg24hPrice is intentionally used for every flea field so legacy
+          // renderers cannot accidentally fall back to lastLowPrice.
+          latest: avg24hPrice,
+          avgDay: avg24hPrice,
+          avgWeek: avg24hPrice,
           trader,
         },
         slots: (item.width || 1) * (item.height || 1),
