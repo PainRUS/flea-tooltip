@@ -2,32 +2,26 @@ import React from "react";
 
 type StaticNumberFlowProps = {
   value: number;
-  locales?: string | string[];
-  format?: Intl.NumberFormatOptions;
   prefix?: string;
   suffix?: string;
   className?: string;
 };
 
 /**
- * Compatibility replacement for @number-flow/react in FleaTooltip.
- *
- * The animated NumberFlow custom element renders multiple digit layers inside
- * a shadow root and positions them with CSS transforms. In the Electron build
- * used by FleaTooltip those layers can remain visually stacked in the Total
- * card. The total value does not need animation, so render the exact same
- * formatted number as ordinary text instead of using the animated custom
- * element.
+ * FleaTooltip only needs a readable total value here. Keep this deliberately
+ * simple: one ordinary text node, no Shadow DOM, animation, transforms or
+ * locale-dependent grouping.
  */
 export default function StaticNumberFlow({
   value,
-  locales,
-  format,
   prefix = "",
   suffix = "",
   className,
 }: StaticNumberFlowProps): JSX.Element {
-  const formattedValue = new Intl.NumberFormat(locales, format).format(value);
+  const safeValue = Number.isFinite(value) ? Math.trunc(value) : 0;
+  const formattedValue = safeValue
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
   return (
     <span className={className}>
@@ -38,8 +32,9 @@ export default function StaticNumberFlow({
   );
 }
 
-// PriceList calls this hook but does not use its return value. Export a
-// compatible implementation so the existing source does not need to change.
+// PriceList still imports this hook from @number-flow/react, but its return
+// value is not used. Keep a tiny compatibility stub until that import is
+// removed from PriceList itself.
 export function useCanAnimate(): boolean {
   return false;
 }
