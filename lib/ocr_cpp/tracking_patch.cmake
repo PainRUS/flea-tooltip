@@ -15,6 +15,10 @@ set(PATCHED_TRACKING_STATE [=[
 	POINT trackedTopLeft{};
 	int trackedMissCount = 0;
 	const int trackedMissLimit = 1;
+	std::vector<unsigned char> trackedFingerprint;
+	const int fingerprintColumns = 32;
+	const int fingerprintRows = 8;
+	const int fingerprintDifferenceLimit = 10;
 
 	auto freshBorderPixelNear = [&](LONG x, LONG y) -> bool {
 		if (!cachedDesktopDC) return false;
@@ -50,6 +54,83 @@ set(PATCHED_TRACKING_STATE [=[
 		return bottomLeftOk && bottomCenterOk && farEdgeOk;
 	};
 
+	// The border alone cannot tell two adjacent items apart because Tarkov can
+	// replace one name rectangle with another without ever showing a frame with
+	// no rectangle. Keep a tiny binary brightness fingerprint of the rectangle's
+	// interior. 32 x 8 samples are only 256 GetPixel calls per validation and do
+	// not involve screenshots, OCR or item lookup.
+	auto captureTooltipFingerprint = [&](const POINT& bottomLeft,
+		const POINT& bottomRight,
+		const POINT& topLeft) -> std::vector<unsigned char> {
+		std::vector<unsigned char> fingerprint;
+		fingerprint.reserve(fingerprintColumns * fingerprintRows);
+
+		LONG left = topLeft.x + 3;
+		LONG right = bottomRight.x - 3;
+		LONG top = topLeft.y + 3;
+		LONG bottom = bottomLeft.y - 3;
+		if (!cachedDesktopDC || right <= left || bottom <= top) {
+			return fingerprint;
+		}
+
+		for (int row = 0; row < fingerprintRows; row++) {
+			LONG y = top +
+				((row * 2 + 1) * (bottom - top)) /
+				(2 * fingerprintRows);
+
+			for (int column = 0; column < fingerprintColumns; column++) {
+				LONG x = left +
+					((column * 2 + 1) * (right - left)) /
+					(2 * fingerprintColumns);
+				COLORREF color = GetPixel(cachedDesktopDC, x, y);
+				if (color == CLR_INVALID) {
+					fingerprint.push_back(0);
+					continue;
+				}
+
+				int luminance =
+					(static_cast<int>(GetRValue(color)) * 3 +
+					 static_cast<int>(GetGValue(color)) * 6 +
+					 static_cast<int>(GetBValue(color))) / 10;
+				fingerprint.push_back(luminance >= 100 ? 1 : 0);
+			}
+		}
+
+		return fingerprint;
+	};
+
+	auto fingerprintMatches = [&](const std::vector<unsigned char>& current) -> bool {
+		if (trackedFingerprint.empty() ||
+			current.size() != trackedFingerprint.size()) {
+			return true;
+		}
+
+		int differences = 0;
+		for (size_t i = 0; i < current.size(); i++) {
+			if (current[i] != trackedFingerprint[i]) {
+				differences++;
+				if (differences > fingerprintDifferenceLimit) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+
+	// 0 = no matching border, 1 = same tooltip, 2 = a tooltip is present but
+	// its interior changed enough to be a different item's name rectangle.
+	auto trackedCandidateState = [&](const POINT& bottomLeft,
+		const POINT& bottomRight,
+		const POINT& topLeft) -> int {
+		if (!trackedRectStillVisible(bottomLeft, bottomRight, topLeft)) {
+			return 0;
+		}
+
+		std::vector<unsigned char> currentFingerprint =
+			captureTooltipFingerprint(bottomLeft, bottomRight, topLeft);
+		return fingerprintMatches(currentFingerprint) ? 1 : 2;
+	};
+
 	while (true) {
 ]=])
 string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_TRACKING_STATE}" TRACKING_STATE_POS)
@@ -60,8 +141,9 @@ string(REPLACE "${ORIGINAL_TRACKING_STATE}" "${PATCHED_TRACKING_STATE}"
   OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
 # Keep validating the cached border even after the cursor stops. While a
-# tooltip is tracked the loop runs at about 60 Hz; the first failed validation
-# means Tarkov's name rectangle is gone and the cached price must disappear.
+# tooltip is tracked the loop runs at about 60 Hz. If the border disappears we
+# emit TOOLTIP_LOST; if Tarkov swaps the contents in-place for another item we
+# emit TOOLTIP_CHANGED. Electron hides the stale price immediately for either.
 set(ORIGINAL_STATIONARY_BLOCK [=[
 			if (
 				lastValidMousePos.x == mousePos.x &&
@@ -80,21 +162,24 @@ set(PATCHED_STATIONARY_BLOCK [=[
 				sleepInterval = trackingTooltip ? 16 : 25;
 
 				if (trackingTooltip) {
-					if (trackedRectStillVisible(
+					int trackedState = trackedCandidateState(
 						trackedBottomLeft,
 						trackedBottomRight,
 						trackedTopLeft
-					)) {
+					);
+
+					if (trackedState == 1) {
 						trackedMissCount = 0;
 					}
-					else if (++trackedMissCount >= trackedMissLimit) {
+					else {
 						trackingTooltip = false;
 						trackedMissCount = 0;
 						foundTooltip = false;
 						showedMouseMoved = false;
+						trackedFingerprint.clear();
 						cachedPixelBuffer.pixels.clear();
 						lastScannedCursor = { 0, 0 };
-						cout << "TOOLTIP_LOST" << endl;
+						cout << (trackedState == 2 ? "TOOLTIP_CHANGED" : "TOOLTIP_LOST") << endl;
 						fflush(stdout);
 					}
 				}
@@ -129,28 +214,39 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 
 				if (trackingTooltip) {
 					sleepInterval = 16;
+					bool sawChangedTooltip = false;
 
 					POINT candidateBottomLeft = trackedBottomLeft;
 					POINT candidateBottomRight = trackedBottomRight;
 					POINT candidateTopLeft = trackedTopLeft;
-					bool trackedVisible = trackedRectStillVisible(
+					int candidateState = trackedCandidateState(
 						candidateBottomLeft,
 						candidateBottomRight,
 						candidateTopLeft
 					);
+					bool trackedVisible = candidateState == 1;
+					sawChangedTooltip = candidateState == 2;
 
 					if (!trackedVisible) {
-						candidateBottomLeft.x += cursorDeltaX;
-						candidateBottomLeft.y += cursorDeltaY;
-						candidateBottomRight.x += cursorDeltaX;
-						candidateBottomRight.y += cursorDeltaY;
-						candidateTopLeft.x += cursorDeltaX;
-						candidateTopLeft.y += cursorDeltaY;
-						trackedVisible = trackedRectStillVisible(
+						candidateBottomLeft = {
+							trackedBottomLeft.x + cursorDeltaX,
+							trackedBottomLeft.y + cursorDeltaY
+						};
+						candidateBottomRight = {
+							trackedBottomRight.x + cursorDeltaX,
+							trackedBottomRight.y + cursorDeltaY
+						};
+						candidateTopLeft = {
+							trackedTopLeft.x + cursorDeltaX,
+							trackedTopLeft.y + cursorDeltaY
+						};
+						candidateState = trackedCandidateState(
 							candidateBottomLeft,
 							candidateBottomRight,
 							candidateTopLeft
 						);
+						trackedVisible = candidateState == 1;
+						sawChangedTooltip = sawChangedTooltip || candidateState == 2;
 					}
 
 					if (!trackedVisible) {
@@ -195,11 +291,13 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 								translatedTopLeft.x + clampShiftX,
 								translatedTopLeft.y + clampShiftY
 							};
-							trackedVisible = trackedRectStillVisible(
+							candidateState = trackedCandidateState(
 								candidateBottomLeft,
 								candidateBottomRight,
 								candidateTopLeft
 							);
+							trackedVisible = candidateState == 1;
+							sawChangedTooltip = sawChangedTooltip || candidateState == 2;
 						}
 					}
 
@@ -210,14 +308,15 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						trackedMissCount = 0;
 						foundTooltip = true;
 					}
-					else if (++trackedMissCount >= trackedMissLimit) {
+					else {
 						trackingTooltip = false;
 						trackedMissCount = 0;
 						foundTooltip = false;
 						showedMouseMoved = false;
+						trackedFingerprint.clear();
 						cachedPixelBuffer.pixels.clear();
 						lastScannedCursor = { 0, 0 };
-						cout << "TOOLTIP_LOST" << endl;
+						cout << (sawChangedTooltip ? "TOOLTIP_CHANGED" : "TOOLTIP_LOST") << endl;
 						fflush(stdout);
 					}
 				}
@@ -253,6 +352,11 @@ set(PATCHED_OCR_SUCCESS [=[
 							trackedBottomLeft = bottomLeftBorderPoint;
 							trackedBottomRight = bottomRightBorderPoint;
 							trackedTopLeft = topLeftBorderPoint;
+							trackedFingerprint = captureTooltipFingerprint(
+								trackedBottomLeft,
+								trackedBottomRight,
+								trackedTopLeft
+							);
 							trackedMissCount = 0;
 							lastScannedCursor = mousePos;
 							cout << scanText << "||" <<
