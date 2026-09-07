@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PRICE_MAX_AGE_MS } from "../../utils";
 import { AppLanguage } from "../../models/UserConfig";
+import { PRICE_LIST } from "../state/priceList";
 
 type PriceStatus = {
   language: AppLanguage;
@@ -21,27 +22,71 @@ function formatCountdown(milliseconds: number): string {
 export default function PriceUpdateStatus() {
   const [status, setStatus] = useState<PriceStatus | null>(null);
   const [now, setNow] = useState(Date.now());
+  const lastAppliedPriceUpdateRef = useRef<number | null>(null);
 
   useEffect(() => {
     let disposed = false;
+
+    const syncVisiblePriceList = async (lastPriceUpdateAt: number | null) => {
+      if (
+        !lastPriceUpdateAt ||
+        lastAppliedPriceUpdateRef.current === lastPriceUpdateAt
+      ) {
+        return;
+      }
+
+      try {
+        const latestItems = await window.electron.getAllItems();
+        if (disposed || !Array.isArray(latestItems) || latestItems.length === 0) {
+          return;
+        }
+
+        const latestById = new Map(
+          latestItems.map((item: any) => [item.id, item] as const)
+        );
+
+        PRICE_LIST.set((currentItems) =>
+          currentItems.map((currentItem) => {
+            const freshItem: any = latestById.get(currentItem.id);
+            if (!freshItem) {
+              return currentItem;
+            }
+
+            return {
+              ...currentItem,
+              availableOnFleaMarket: freshItem.availableOnFleaMarket,
+              prices: freshItem.prices,
+              slots: freshItem.slots,
+            };
+          })
+        );
+        lastAppliedPriceUpdateRef.current = lastPriceUpdateAt;
+      } catch (error) {
+        console.error("Failed to sync refreshed prices into visible list:", error);
+      }
+    };
 
     const refreshStatus = async () => {
       try {
         const config = await window.electron.getUserConfig();
         if (disposed) return;
 
+        const lastPriceUpdateAt =
+          typeof config.lastPriceUpdateAt === "number"
+            ? config.lastPriceUpdateAt
+            : null;
+
         setStatus({
           language: config.language ?? "en",
-          lastPriceUpdateAt:
-            typeof config.lastPriceUpdateAt === "number"
-              ? config.lastPriceUpdateAt
-              : null,
+          lastPriceUpdateAt,
           nextPriceUpdateAt:
             typeof config.nextPriceUpdateAt === "number"
               ? config.nextPriceUpdateAt
               : null,
           priceUpdateFailed: config.priceUpdateFailed ?? false,
         });
+
+        void syncVisiblePriceList(lastPriceUpdateAt);
       } catch (error) {
         console.error("Failed to read price update status:", error);
       }
