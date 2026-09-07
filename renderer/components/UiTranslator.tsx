@@ -26,37 +26,6 @@ const russianText: Record<string, string> = {
   "N/A": "Н/Д",
 };
 
-type NumberFlowElement = HTMLElement & {
-  animated?: boolean;
-};
-
-function stabilizeNumberFlow(root: Node): void {
-  const elements: NumberFlowElement[] = [];
-
-  if (
-    root instanceof HTMLElement &&
-    root.tagName.toLowerCase() === "number-flow-react"
-  ) {
-    elements.push(root as NumberFlowElement);
-  }
-
-  if (root instanceof Element) {
-    root.querySelectorAll("number-flow-react").forEach((element) => {
-      elements.push(element as NumberFlowElement);
-    });
-  }
-
-  elements.forEach((element) => {
-    // NumberFlow's animated digit layout renders incorrectly in the Electron
-    // version used by FleaTooltip (digits overlap in the Total card). The
-    // component officially supports disabling animation at runtime, which
-    // keeps its locale-aware number formatting but renders a stable value.
-    if (element.animated !== false) {
-      element.animated = false;
-    }
-  });
-}
-
 function translateTextNode(node: Text): void {
   const original = node.nodeValue ?? "";
   const trimmed = original.trim();
@@ -102,32 +71,24 @@ export default function UiTranslator(): null {
         const config = await window.electron.getUserConfig();
         const isRussian = (config.language ?? "en") === "ru";
 
-        // This UI compatibility fix is language-independent.
-        stabilizeNumberFlow(document.body);
-
-        if (isRussian) {
-          document.documentElement.lang = "ru";
-          translateElement(document.body);
+        // English UI needs no DOM observer. NumberFlow is already replaced at
+        // bundle time by the stable text renderer, so there is no runtime
+        // compatibility work left to do here.
+        if (!isRussian) {
+          return;
         }
+
+        document.documentElement.lang = "ru";
+        translateElement(document.body);
 
         observer = new MutationObserver((mutations) => {
           for (const mutation of mutations) {
-            mutation.addedNodes.forEach((node) => {
-              stabilizeNumberFlow(node);
-              if (isRussian) {
-                translateElement(node);
-              }
-            });
+            mutation.addedNodes.forEach(translateElement);
 
-            if (isRussian && mutation.type === "characterData") {
+            if (mutation.type === "characterData") {
               translateElement(mutation.target);
             }
           }
-
-          // NumberFlow updates its internal value without necessarily replacing
-          // the host element, so enforce the non-animated mode after every UI
-          // mutation as well.
-          stabilizeNumberFlow(document.body);
         });
 
         observer.observe(document.body, {
@@ -136,7 +97,7 @@ export default function UiTranslator(): null {
           characterData: true,
         });
       } catch (error) {
-        console.error("Failed to initialize UI helpers:", error);
+        console.error("Failed to initialize UI translation:", error);
       }
     };
 
