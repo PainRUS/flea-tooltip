@@ -10,7 +10,8 @@
     "postpackage": "powershell -Command \"Move-Item -Path './out/FleaTooltip-win32-x64/resources/eng.traineddata' -Destination './out/FleaTooltip-win32-x64/'\"",
     "make": "electron-forge make",
     "publish": "electron-forge publish",
-    "lint": "eslint --ext .ts,.tsx ."
+    "lint": "eslint --ext .ts,.tsx .",
+    "setup:ru-ocr": "node scripts/setup-russian-ocr.js"
   },
   "keywords": [],
   "author": {
