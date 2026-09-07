@@ -88,10 +88,9 @@ export default class TooltipWindow extends BrowserWindow {
     }, 40);
   }
 
-  // Tracking an already-recognized Tarkov tooltip should be extremely cheap.
-  // Reuse the current rendered price-card dimensions and only move the native
-  // BrowserWindow; do not re-measure React or recreate the tooltip on every
-  // mouse pixel.
+  // This is called by a small main-process cursor-follow loop while a Tarkov
+  // item tooltip is being tracked. Only move the existing native window; do
+  // not re-measure React, rebuild the card or touch z-order on every frame.
   public moveNearCursor(cursorX: number, cursorY: number): void {
     if (this.isDestroyed()) {
       return;
@@ -108,12 +107,18 @@ export default class TooltipWindow extends BrowserWindow {
       currentBounds.height
     );
 
-    this.setPosition(x, y, false);
-    this.setAlwaysOnTop(true, "screen-saver");
-    if (!this.isVisible()) {
-      this.showInactive();
+    if (currentBounds.x !== x || currentBounds.y !== y) {
+      this.setPosition(x, y, false);
     }
-    this.moveTop();
+
+    // Normally the window is already visible and top-most. Only reassert those
+    // properties if something external hid it, rather than doing expensive
+    // z-order work at 60 FPS.
+    if (!this.isVisible()) {
+      this.setAlwaysOnTop(true, "screen-saver");
+      this.showInactive();
+      this.moveTop();
+    }
   }
 
   private getPositionNearCursor(
