@@ -29,6 +29,7 @@ export default class OCRProcess {
   protected Point: koffi.IKoffiCType;
   protected language: AppLanguage = "en";
   protected stdoutBuffer = "";
+  protected hasTrackedTooltipItem = false;
 
   public setPriceListWindow(priceListWindow: BrowserWindow): void {
     this.priceListWindow = priceListWindow;
@@ -166,6 +167,27 @@ export default class OCRProcess {
     }
   }
 
+  protected hideTrackedTooltip(): void {
+    this.hasTrackedTooltipItem = false;
+    if (!this.tooltipWindow) {
+      return;
+    }
+
+    this.tooltipWindow.webContents.send(IpcConstants.NewTooltipItem, null);
+    setTimeout(() => {
+      this.tooltipWindow?.hideTooltip();
+    }, 30);
+  }
+
+  protected moveTrackedTooltip(physicalX: number, physicalY: number): void {
+    if (!this.hasTrackedTooltipItem || !this.tooltipWindow) {
+      return;
+    }
+
+    const logicalPos = this.getLogicalPosition(physicalX, physicalY);
+    this.tooltipWindow.moveNearCursor(logicalPos.x, logicalPos.y);
+  }
+
   onNewData(data: any): void {
     try {
       const incomingData = String(data).trim();
@@ -190,16 +212,25 @@ export default class OCRProcess {
         return;
       }
 
-      if (incomingData === "MOUSEMOVE") {
-        if (this.tooltipWindow) {
-          this.tooltipWindow.webContents.send(
-            IpcConstants.NewTooltipItem,
-            null
-          );
-          setTimeout(() => {
-            this.tooltipWindow?.hideTooltip();
-          }, 30);
+      if (incomingData.startsWith("TRACKMOVE|")) {
+        const parts = incomingData.split("|");
+        if (parts.length >= 3) {
+          const x = parseInt(parts[1]);
+          const y = parseInt(parts[2]);
+          if (Number.isFinite(x) && Number.isFinite(y)) {
+            this.moveTrackedTooltip(x, y);
+          }
         }
+        return;
+      }
+
+      if (incomingData === "TOOLTIP_LOST") {
+        this.hideTrackedTooltip();
+        return;
+      }
+
+      if (incomingData === "MOUSEMOVE") {
+        this.hideTrackedTooltip();
       } else if (incomingData.includes("||")) {
         // English OCR historically strips non-ASCII noise. Russian OCR must
         // preserve UTF-8 Cyrillic output.
@@ -304,6 +335,7 @@ export default class OCRProcess {
             }
 
             if (this.tooltipWindow) {
+              this.hasTrackedTooltipItem = true;
               this.tooltipWindow.webContents.send(
                 IpcConstants.NewTooltipItem,
                 item
