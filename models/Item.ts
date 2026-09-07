@@ -15,6 +15,7 @@ type ItemPrices = {
   latest: number;
   avgDay: number;
   avgWeek: number;
+  updatedAt?: number;
   trader: TraderPrice;
 };
 
