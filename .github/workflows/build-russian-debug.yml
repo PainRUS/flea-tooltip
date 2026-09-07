@@ -26,6 +26,10 @@ jobs:
         shell: pwsh
         run: npm.cmd install
 
+      - name: Run item search regression tests
+        shell: pwsh
+        run: npm.cmd run test:search
+
       - name: Download Russian OCR language data
         shell: pwsh
         run: npm.cmd run setup:ru-ocr
