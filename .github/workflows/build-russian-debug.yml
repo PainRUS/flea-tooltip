@@ -1,0 +1,87 @@
+name: Build Russian OCR Debug
+
+on:
+  push:
+    branches:
+      - feature/russian-ui-ocr-debug
+  workflow_dispatch:
+
+jobs:
+  typescript:
+    name: Verify Electron app
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm.cmd install
+
+      - name: Download Russian OCR language data
+        shell: pwsh
+        run: npm.cmd run setup:ru-ocr
+
+      - name: Compile Electron application
+        shell: pwsh
+        run: npm.cmd run package
+
+  ocr:
+    name: Build native OCR runtime
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate vcpkg
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          if (-not (Test-Path "$root\vcpkg.exe")) {
+            throw "vcpkg.exe not found at $root"
+          }
+          "root=$root" >> $env:GITHUB_OUTPUT
+
+      - name: Install Tesseract
+        shell: pwsh
+        run: |
+          & "${{ steps.vcpkg.outputs.root }}\vcpkg.exe" install tesseract:x64-windows
+
+      - name: Configure OCR build
+        shell: pwsh
+        run: |
+          cmake `
+            -S lib/ocr_cpp `
+            -B build/ocr `
+            -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.vcpkg.outputs.root }}\scripts\buildsystems\vcpkg.cmake"
+
+      - name: Build OCR
+        shell: pwsh
+        run: cmake --build build/ocr --config Release --parallel
+
+      - name: Prepare runtime artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact/ocr | Out-Null
+          Copy-Item build/ocr/Release/ocr_cpp.exe artifact/ocr/ocr_cpp.exe
+          Copy-Item "${{ steps.vcpkg.outputs.root }}\installed\x64-windows\bin\*.dll" artifact/ocr/ -Force
+          Copy-Item lib/ocr/scanningConfig.json artifact/ocr/scanningConfig.json
+          Copy-Item lib/ocr/eng.traineddata artifact/ocr/eng.traineddata
+          Invoke-WebRequest `
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/rus.traineddata" `
+            -OutFile artifact/ocr/rus.traineddata
+
+      - name: Upload OCR runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: FleaTooltip-OCR-Russian-Debug
+          path: artifact/ocr
+          if-no-files-found: error
