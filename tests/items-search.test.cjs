@@ -84,3 +84,12 @@ test("Russian OCR fallback is disabled in English mode", () => {
 
   assert.equal(result, null);
 });
+
+test("flea unlock level is read only from a valid positive minLevelForFlea value", () => {
+  const catalog = new Items();
+
+  assert.equal(catalog.getFleaMarketMinLevel({ minLevelForFlea: 30 }), 30);
+  assert.equal(catalog.getFleaMarketMinLevel({ minLevelForFlea: 20.4 }), 20);
+  assert.equal(catalog.getFleaMarketMinLevel({ minLevelForFlea: 0 }), undefined);
+  assert.equal(catalog.getFleaMarketMinLevel({}), undefined);
+});
