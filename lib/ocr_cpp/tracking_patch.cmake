@@ -141,9 +141,10 @@ string(REPLACE "${ORIGINAL_TRACKING_STATE}" "${PATCHED_TRACKING_STATE}"
   OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
 # Keep validating the cached border even after the cursor stops. While a
-# tooltip is tracked the loop runs at about 60 Hz. If the border disappears we
-# emit TOOLTIP_LOST; if Tarkov swaps the contents in-place for another item we
-# emit TOOLTIP_CHANGED. Electron hides the stale price immediately for either.
+# tooltip is tracked the loop runs at about 60 Hz. Both disappearance and a
+# content swap invalidate the cached price through the existing TOOLTIP_LOST
+# event, so Electron can hide the stale price immediately without a new IPC
+# protocol path.
 set(ORIGINAL_STATIONARY_BLOCK [=[
 			if (
 				lastValidMousePos.x == mousePos.x &&
@@ -172,6 +173,9 @@ set(PATCHED_STATIONARY_BLOCK [=[
 						trackedMissCount = 0;
 					}
 					else {
+						if (trackedState == 2 && debugMode) {
+							debugLog("TOOLTIP_CHANGED");
+						}
 						trackingTooltip = false;
 						trackedMissCount = 0;
 						foundTooltip = false;
@@ -179,7 +183,7 @@ set(PATCHED_STATIONARY_BLOCK [=[
 						trackedFingerprint.clear();
 						cachedPixelBuffer.pixels.clear();
 						lastScannedCursor = { 0, 0 };
-						cout << (trackedState == 2 ? "TOOLTIP_CHANGED" : "TOOLTIP_LOST") << endl;
+						cout << "TOOLTIP_LOST" << endl;
 						fflush(stdout);
 					}
 				}
@@ -309,6 +313,9 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						foundTooltip = true;
 					}
 					else {
+						if (sawChangedTooltip && debugMode) {
+							debugLog("TOOLTIP_CHANGED");
+						}
 						trackingTooltip = false;
 						trackedMissCount = 0;
 						foundTooltip = false;
@@ -316,7 +323,7 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 						trackedFingerprint.clear();
 						cachedPixelBuffer.pixels.clear();
 						lastScannedCursor = { 0, 0 };
-						cout << (sawChangedTooltip ? "TOOLTIP_CHANGED" : "TOOLTIP_LOST") << endl;
+						cout << "TOOLTIP_LOST" << endl;
 						fflush(stdout);
 					}
 				}
