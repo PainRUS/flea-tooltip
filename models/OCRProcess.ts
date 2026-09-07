@@ -197,7 +197,7 @@ export default class OCRProcess {
             null
           );
           setTimeout(() => {
-            this.tooltipWindow.setBounds({ width: 0, height: 0, x: 0, y: 0 });
+            this.tooltipWindow?.hideTooltip();
           }, 30);
         }
       } else if (incomingData.includes("||")) {
@@ -313,13 +313,10 @@ export default class OCRProcess {
                   mousePos.x,
                   mousePos.y
                 );
-                this.tooltipWindow.setPosition(
-                  logicalPos.x + 13,
-                  logicalPos.y + 13
+                this.tooltipWindow?.showNearCursor(
+                  logicalPos.x,
+                  logicalPos.y
                 );
-                setTimeout(() => {
-                  this.tooltipWindow.setBounds({ width: 500, height: 500 });
-                }, 10);
               }, 5);
             }
           }
