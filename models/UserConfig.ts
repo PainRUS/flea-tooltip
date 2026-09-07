@@ -27,4 +27,7 @@ export type UserConfig = {
   language?: AppLanguage;
   ocrDebugMode?: boolean;
   ocrDebugStepDelay?: number; // 100-2000 ms
+  lastPriceUpdateAt?: number | null;
+  nextPriceUpdateAt?: number | null;
+  priceUpdateFailed?: boolean;
 };
