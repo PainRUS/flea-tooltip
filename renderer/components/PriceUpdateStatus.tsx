@@ -66,7 +66,7 @@ export default function PriceUpdateStatus() {
 
   const isRussian = status.language === "ru";
   const expired =
-    !status.lastPriceUpdateAt ||
+    status.lastPriceUpdateAt !== null &&
     now - status.lastPriceUpdateAt >= PRICE_MAX_AGE_MS;
   const failed = status.priceUpdateFailed || expired;
 
