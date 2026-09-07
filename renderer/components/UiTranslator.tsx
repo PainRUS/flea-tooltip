@@ -62,7 +62,7 @@ function translateElement(root: Node): void {
   root.childNodes.forEach(translateElement);
 }
 
-export default function UiTranslator() {
+export default function UiTranslator(): null {
   useEffect(() => {
     let observer: MutationObserver | null = null;
 
