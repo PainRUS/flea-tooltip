@@ -105,6 +105,8 @@ jobs:
           New-Item -ItemType Directory -Force artifact/ocr | Out-Null
           Copy-Item build/ocr/Release/ocr_cpp.exe artifact/ocr/ocr_cpp.exe
           Copy-Item "${{ steps.vcpkg.outputs.root }}\installed\x64-windows\bin\*.dll" artifact/ocr/ -Force
+          Copy-Item lib/ocr/configure_screen.exe artifact/ocr/configure_screen.exe
+          Copy-Item lib/ocr/setalwaysontop.exe artifact/ocr/setalwaysontop.exe
           Copy-Item lib/ocr/scanningConfig.json artifact/ocr/scanningConfig.json
           Copy-Item lib/ocr/eng.traineddata artifact/ocr/eng.traineddata
           Invoke-WebRequest `
@@ -151,6 +153,8 @@ jobs:
 
           $required = @(
             'lib/ocr/ocr_cpp.exe',
+            'lib/ocr/configure_screen.exe',
+            'lib/ocr/setalwaysontop.exe',
             'lib/ocr/scanningConfig.json',
             'lib/ocr/eng.traineddata',
             'lib/ocr/rus.traineddata'
@@ -172,6 +176,8 @@ jobs:
           $required = @(
             "$packageRoot/FleaTooltip.exe",
             "$packageRoot/resources/ocr/ocr_cpp.exe",
+            "$packageRoot/resources/ocr/configure_screen.exe",
+            "$packageRoot/resources/ocr/setalwaysontop.exe",
             "$packageRoot/resources/ocr/scanningConfig.json",
             "$packageRoot/resources/ocr/eng.traineddata",
             "$packageRoot/resources/ocr/rus.traineddata"
