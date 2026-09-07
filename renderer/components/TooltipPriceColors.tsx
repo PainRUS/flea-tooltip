@@ -46,6 +46,8 @@ export default function TooltipPriceColors() {
       ? Math.ceil(item.prices.trader.price / slots)
       : 0;
 
+  // Each displayed sell route is classified independently by its RUB/slot
+  // value, matching the numbers the tooltip already presents to the user.
   const fleaColor = getPriceColor(
     fleaPricePerSlot,
     true,
