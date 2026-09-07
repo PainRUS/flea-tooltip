@@ -329,7 +329,7 @@ set(PATCHED_OCR_SUCCESS [=[
 								mousePos.x << "," << mousePos.y << endl;
 ]=])
 string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_OCR_SUCCESS}" TRACKING_SUCCESS_POS)
-if(OCR_SUCCESS_TRACKING_POS EQUAL -1)
+if(TRACKING_SUCCESS_POS EQUAL -1)
   message(FATAL_ERROR "Expected OCR success block was not found for tooltip tracking")
 endif()
 string(REPLACE "${ORIGINAL_OCR_SUCCESS}" "${PATCHED_OCR_SUCCESS}"
