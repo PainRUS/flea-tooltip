@@ -256,6 +256,11 @@ string(REPLACE
   "${OCR_SOURCE_CONTENT}"
 )
 
+# Add the lightweight state machine that keeps a successfully detected Tarkov
+# name tooltip cached while the cursor moves. This runs after the geometry
+# patches above so it tracks the real, normalized rectangle.
+include("${CMAKE_CURRENT_SOURCE_DIR}/tracking_patch.cmake")
+
 set(GENERATED_OCR_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/ocr_cpp.generated.cpp")
 file(WRITE "${GENERATED_OCR_SOURCE}" "${OCR_SOURCE_CONTENT}")
 
