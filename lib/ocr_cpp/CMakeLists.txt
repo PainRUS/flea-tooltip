@@ -80,8 +80,8 @@ set(PATCHED_CAPTURE_BLOCK [=[
 
 				const int monitorWidth = monitorRect.right - monitorRect.left;
 				const int monitorHeight = monitorRect.bottom - monitorRect.top;
-				captureWidth = std::min(captureWidth, monitorWidth);
-				captureHeight = std::min(captureHeight, monitorHeight);
+				captureWidth = (std::min)(captureWidth, monitorWidth);
+				captureHeight = (std::min)(captureHeight, monitorHeight);
 
 				int captureX = std::clamp(
 					desiredCaptureX,
