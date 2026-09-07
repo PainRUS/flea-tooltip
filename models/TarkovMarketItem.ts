@@ -25,4 +25,5 @@ export default class TarkovMarketItem {
   bsgId!: string;
   isFunctional!: boolean;
   reference!: string;
+  minLevelForFlea?: number;
 }
