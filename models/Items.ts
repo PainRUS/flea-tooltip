@@ -7,6 +7,7 @@ import { getUserConfigData } from "../main/services/config";
 export default class Items {
   items: Item[];
   searchIndex: MiniSearch;
+  private activeLanguage: AppLanguage = "en";
 
   constructor() {
     this.items = [];
@@ -19,6 +20,7 @@ export default class Items {
   ): Promise<void> {
     const selectedLanguage: AppLanguage =
       language ?? getUserConfigData().language ?? "en";
+    this.activeLanguage = selectedLanguage;
     const tarkovMarketApiKey = apiKey || "";
 
     this.items = [];
@@ -298,6 +300,165 @@ export default class Items {
     this.searchIndex.addAll(this.items);
   }
 
+  private tokenizeForRussianOcr(value: string): string[] {
+    return value
+      .normalize("NFKC")
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .map((token) =>
+        token.replace(/^[^0-9a-zа-яё]+|[^0-9a-zа-яё]+$/gi, "")
+      )
+      .filter(Boolean);
+  }
+
+  private normalizeRussianOcrModel(value: string): string {
+    const confusables: { [character: string]: string } = {
+      а: "a",
+      в: "b",
+      с: "c",
+      е: "e",
+      ё: "e",
+      н: "h",
+      к: "k",
+      м: "m",
+      о: "o",
+      р: "p",
+      т: "t",
+      х: "x",
+      у: "y",
+    };
+
+    return value
+      .normalize("NFKC")
+      .toLowerCase()
+      .split("")
+      .map((character) => confusables[character] || character)
+      .join("")
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  private getNormalizedSimilarity(left: string, right: string): number {
+    if (left === right) {
+      return 1;
+    }
+    if (!left || !right) {
+      return 0;
+    }
+
+    const previous = Array.from({ length: right.length + 1 }, (_, index) =>
+      index
+    );
+
+    for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+      const current = [leftIndex];
+      for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+        current[rightIndex] = Math.min(
+          current[rightIndex - 1] + 1,
+          previous[rightIndex] + 1,
+          previous[rightIndex - 1] +
+            (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+        );
+      }
+
+      for (let index = 0; index < current.length; index++) {
+        previous[index] = current[index];
+      }
+    }
+
+    const distance = previous[right.length];
+    return 1 - distance / Math.max(left.length, right.length);
+  }
+
+  private searchRussianOcrFallback(searchQuery: string): Item | null {
+    const queryTokens = this.tokenizeForRussianOcr(searchQuery);
+
+    // This fallback exists only for mixed Russian + Latin model names. A
+    // one-word OCR result does not contain enough structure to use it safely.
+    if (queryTokens.length < 2) {
+      return null;
+    }
+
+    const firstToken = queryTokens[0];
+    const candidates: Array<{ item: Item; similarity: number }> = [];
+
+    for (const candidate of this.items) {
+      const candidateTokens = this.tokenizeForRussianOcr(candidate.searchName);
+
+      // Keep the fallback deliberately narrow: the Russian leading noun must
+      // match exactly, and a shorter generic item such as "Балаклава" must not
+      // beat "Балаклава Momex" merely because the first word is perfect.
+      if (
+        candidateTokens.length < queryTokens.length ||
+        candidateTokens[0] !== firstToken ||
+        candidateTokens.length - queryTokens.length > 2
+      ) {
+        continue;
+      }
+
+      let commonPrefixLength = 0;
+      while (
+        commonPrefixLength < queryTokens.length &&
+        commonPrefixLength < candidateTokens.length &&
+        queryTokens[commonPrefixLength] === candidateTokens[commonPrefixLength]
+      ) {
+        commonPrefixLength++;
+      }
+
+      if (commonPrefixLength < 1) {
+        continue;
+      }
+
+      const queryModel = this.normalizeRussianOcrModel(
+        queryTokens.slice(commonPrefixLength).join("")
+      );
+      const candidateModel = this.normalizeRussianOcrModel(
+        candidateTokens.slice(commonPrefixLength).join("")
+      );
+
+      if (!queryModel || !candidateModel) {
+        continue;
+      }
+
+      candidates.push({
+        item: candidate,
+        similarity: this.getNormalizedSimilarity(queryModel, candidateModel),
+      });
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort((left, right) => right.similarity - left.similarity);
+    const best = candidates[0];
+    const second = candidates[1];
+    const queryModelLength = this.normalizeRussianOcrModel(
+      queryTokens.slice(1).join("")
+    ).length;
+    const minimumSimilarity = queryModelLength >= 5 ? 0.48 : 0.6;
+    const minimumLead = 0.08;
+
+    if (
+      best.similarity < minimumSimilarity ||
+      (second && best.similarity - second.similarity < minimumLead)
+    ) {
+      console.log(
+        `Russian OCR fallback rejected "${searchQuery}": best candidate "${best.item.searchName}" similarity ${best.similarity.toFixed(3)}${
+          second
+            ? `, second "${second.item.searchName}" ${second.similarity.toFixed(3)}`
+            : ""
+        }`
+      );
+      return null;
+    }
+
+    console.log(
+      `Russian OCR fallback matched "${searchQuery}" to "${best.item.searchName}" with model similarity ${best.similarity.toFixed(3)}`
+    );
+    return best.item;
+  }
+
   search(searchQuery: string, lowestAcceptableScore = 0): Item {
     const searchResults = this.searchIndex.search(searchQuery);
 
@@ -307,18 +468,25 @@ export default class Items {
 
     const topResult: SearchResult = searchResults[0];
     const item = this.getItemById(topResult.id);
+    const exactMatch =
+      searchQuery.trim().toLowerCase() === item.searchName.trim().toLowerCase();
 
     console.log(
-      `Search for "${searchQuery}" returned top result: "${item.searchName}" with score ${topResult.score} with a max score of ${lowestAcceptableScore}`
+      `Search for "${searchQuery}" returned top result: "${item.searchName}" with score ${topResult.score}; required minimum ${lowestAcceptableScore}`
     );
-    if (
-      topResult.score <= lowestAcceptableScore &&
-      searchQuery.trim().toLowerCase() !== item.searchName.trim().toLowerCase()
-    ) {
-      return null;
+
+    if (topResult.score > lowestAcceptableScore || exactMatch) {
+      return item;
     }
 
-    return item;
+    if (this.activeLanguage === "ru") {
+      const fallbackItem = this.searchRussianOcrFallback(searchQuery);
+      if (fallbackItem) {
+        return fallbackItem;
+      }
+    }
+
+    return null;
   }
 
   getItemById(id: string): Item {
