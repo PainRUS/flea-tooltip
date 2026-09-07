@@ -117,3 +117,78 @@ jobs:
           name: FleaTooltip-OCR-Russian-Debug
           path: artifact/ocr
           if-no-files-found: error
+
+  portable:
+    name: Build portable Windows ZIP
+    needs:
+      - typescript
+      - ocr
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm.cmd install
+
+      - name: Download freshly built OCR runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: FleaTooltip-OCR-Russian-Debug
+          path: artifact/ocr
+
+      - name: Install OCR runtime into Electron resources
+        shell: pwsh
+        run: |
+          Remove-Item lib/ocr/* -Recurse -Force
+          Copy-Item artifact/ocr/* lib/ocr/ -Recurse -Force
+
+          $required = @(
+            'lib/ocr/ocr_cpp.exe',
+            'lib/ocr/scanningConfig.json',
+            'lib/ocr/eng.traineddata',
+            'lib/ocr/rus.traineddata'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) {
+              throw "Required OCR runtime file is missing: $file"
+            }
+          }
+
+      - name: Build portable Electron package
+        shell: pwsh
+        run: npm.cmd run package
+
+      - name: Verify portable package contents
+        shell: pwsh
+        run: |
+          $packageRoot = 'out/FleaTooltip-win32-x64'
+          $required = @(
+            "$packageRoot/FleaTooltip.exe",
+            "$packageRoot/resources/ocr/ocr_cpp.exe",
+            "$packageRoot/resources/ocr/scanningConfig.json",
+            "$packageRoot/resources/ocr/eng.traineddata",
+            "$packageRoot/resources/ocr/rus.traineddata"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) {
+              throw "Portable package is missing: $file"
+            }
+          }
+
+      # GitHub Actions downloads artifacts as ZIP archives automatically. Upload
+      # the complete portable folder so testers get one ZIP containing the EXE
+      # and every required resource/DLL with no manual installation step.
+      - name: Upload portable Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: FleaTooltip-RU-PvE-Test
+          path: out/FleaTooltip-win32-x64
+          if-no-files-found: error
+          retention-days: 30
