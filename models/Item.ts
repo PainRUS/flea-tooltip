@@ -2,6 +2,8 @@ export default class Item {
   id: string;
   name: string;
   shortName: string;
+  searchName: string;
+  searchShortName: string;
   availableOnFleaMarket: boolean;
   prices: ItemPrices;
   slots: number;
@@ -38,6 +40,8 @@ export class ClientItem extends Item {
     this.name = item.name;
     this.prices = item.prices;
     this.shortName = item.shortName;
+    this.searchName = item.searchName;
+    this.searchShortName = item.searchShortName;
     this.slots = item.slots;
     this.tasks = item.tasks;
     this.count = 1;
