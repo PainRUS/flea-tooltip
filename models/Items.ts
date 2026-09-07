@@ -2,6 +2,7 @@ import Item, { ItemTask } from "./Item";
 import MiniSearch, { SearchResult } from "minisearch";
 import TarkovMarketItem from "./TarkovMarketItem";
 import { AppLanguage } from "./UserConfig";
+import { getUserConfigData } from "../main/services/config";
 
 export default class Items {
   items: Item[];
@@ -14,17 +15,18 @@ export default class Items {
   async fetchItems(
     apiKey?: string,
     usePveMode?: boolean,
-    language: AppLanguage = "en"
+    language?: AppLanguage
   ): Promise<void> {
+    const selectedLanguage: AppLanguage =
+      language ?? getUserConfigData().language ?? "en";
     const tarkovMarketApiKey = apiKey || "";
 
-    // Clear existing items when refetching
     this.items = [];
 
     try {
       // Tarkov Market returns English names. In Russian mode use Tarkov.dev so
       // OCR/search names and UI names always match the selected game language.
-      if (tarkovMarketApiKey.trim() !== "" && language === "en") {
+      if (tarkovMarketApiKey.trim() !== "" && selectedLanguage === "en") {
         console.log("Using Tarkov Market API key for item fetch");
 
         const tarkovMarketUrl = usePveMode
@@ -45,32 +47,33 @@ export default class Items {
         }
 
         const data: TarkovMarketItem[] = await res.json();
-        const formattedData: Item[] = data.map((item: TarkovMarketItem) => {
-          return {
-            id: item.uid,
-            name: item.name,
-            shortName: item.shortName,
-            searchName: item.name,
-            searchShortName: item.shortName,
-            availableOnFleaMarket: !item.bannedOnFlea,
-            slots: item.slots,
-            prices: {
-              latest: item.price,
-              avgDay: item.avg24hPrice,
-              avgWeek: item.avg7daysPrice,
-              trader: {
-                name: item.traderName,
-                price: item.traderPriceRub,
-              },
+        const formattedData: Item[] = data.map((item: TarkovMarketItem) => ({
+          id: item.uid,
+          name: item.name,
+          shortName: item.shortName,
+          searchName: item.name,
+          searchShortName: item.shortName,
+          availableOnFleaMarket: !item.bannedOnFlea,
+          slots: item.slots,
+          prices: {
+            latest: item.price,
+            avgDay: item.avg24hPrice,
+            avgWeek: item.avg7daysPrice,
+            trader: {
+              name: item.traderName,
+              price: item.traderPriceRub,
             },
-            tasks: [] as ItemTask[],
-            icon: item.icon,
-          };
-        });
+          },
+          tasks: [] as ItemTask[],
+          icon: item.icon,
+        }));
 
         this.items = formattedData;
       } else {
-        if (tarkovMarketApiKey.trim() !== "" && language === "ru") {
+        if (
+          tarkovMarketApiKey.trim() !== "" &&
+          selectedLanguage === "ru"
+        ) {
           console.log(
             "Russian language selected; using Tarkov.dev JSON API for localized item names"
           );
@@ -80,23 +83,29 @@ export default class Items {
           );
         }
 
-        const itemsFromApi = await this.getItemsPromise(usePveMode, language);
+        const itemsFromApi = await this.getItemsPromise(
+          usePveMode,
+          selectedLanguage
+        );
         console.log(itemsFromApi.length + " items fetched from API");
         this.items = itemsFromApi;
       }
     } catch (error) {
       console.error("Failed to fetch items:", error);
 
-      // Tarkov.dev was already attempted if no key is available or Russian
-      // language is selected.
-      if (tarkovMarketApiKey.trim() === "" || language === "ru") {
+      if (
+        tarkovMarketApiKey.trim() === "" ||
+        selectedLanguage === "ru"
+      ) {
         throw new Error("Failed to fetch items from API");
       }
 
-      // Try Tarkov.dev as fallback when Tarkov Market API fails.
       try {
         console.log("Falling back to Tarkov.dev JSON API");
-        const itemsFromApi = await this.getItemsPromise(usePveMode, language);
+        const itemsFromApi = await this.getItemsPromise(
+          usePveMode,
+          selectedLanguage
+        );
         console.log(itemsFromApi.length + " items fetched from API");
         this.items = itemsFromApi;
       } catch (fallbackError) {
@@ -172,8 +181,6 @@ export default class Items {
       return typeof translated === "string" ? translated : value;
     };
 
-    // Trader names are kept in a separate static endpoint. Failure to load
-    // them should not prevent item prices from working.
     const traderNames: { [id: string]: string } = {};
     try {
       const [tradersResponse, traderTranslationsResponse] = await Promise.all([
@@ -219,18 +226,17 @@ export default class Items {
         : [];
 
       const trader = traderPrices
-        .map((price: any) => {
-          return {
-            name: traderNames[price.trader] ||
-              (language === "ru" ? "Торговец" : "Trader"),
-            price:
-              typeof price.priceRUB === "number"
-                ? price.priceRUB
-                : typeof price.price === "number"
-                  ? price.price
-                  : 0,
-          };
-        })
+        .map((price: any) => ({
+          name:
+            traderNames[price.trader] ||
+            (language === "ru" ? "Торговец" : "Trader"),
+          price:
+            typeof price.priceRUB === "number"
+              ? price.priceRUB
+              : typeof price.price === "number"
+                ? price.price
+                : 0,
+        }))
         .sort(
           (a: { price: number }, b: { price: number }) => b.price - a.price
         )[0] || {
@@ -244,12 +250,11 @@ export default class Items {
 
       return {
         id: item.id,
-        // Keep the canonical English full name for existing task matching.
+        // Keep English full names internally so the existing quest/task table
+        // continues to work exactly as before.
         name: canonicalName,
-        // shortName is displayed in the UI and therefore follows the selected language.
+        // UI and OCR use exactly one selected language.
         shortName: selectedShortName,
-        // OCR/search fields follow exactly one selected language; there is no
-        // automatic mixed-language matching.
         searchName: selectedName,
         searchShortName: selectedShortName,
         availableOnFleaMarket:
