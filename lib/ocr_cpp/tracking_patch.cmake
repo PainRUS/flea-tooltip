@@ -19,20 +19,23 @@ set(PATCHED_TRACKING_STATE [=[
 	const LONG trackedWidthTolerance = 5;
 	const LONG trackedHeightTolerance = 4;
 
-	auto freshBorderPixelNear = [&](LONG x, LONG y) -> bool {
+	auto freshBorderPixelExact = [&](LONG x, LONG y) -> bool {
 		if (!cachedDesktopDC) return false;
+		COLORREF color = GetPixel(cachedDesktopDC, x, y);
+		if (color == CLR_INVALID) return false;
 
-		// A two-pixel neighborhood keeps the cheap check tolerant of minor
-		// anti-aliasing/sub-pixel differences between rendered frames.
+		short pixelRed = static_cast<short>(GetRValue(color));
+		short pixelGreen = static_cast<short>(GetGValue(color));
+		short pixelBlue = static_cast<short>(GetBValue(color));
+		return pixelIsBorderColor(pixelRed, pixelGreen, pixelBlue);
+	};
+
+	auto freshBorderPixelNear = [&](LONG x, LONG y) -> bool {
+		// A two-pixel neighborhood keeps ordinary presence checks tolerant of
+		// minor rendering differences between frames.
 		for (LONG dy = -2; dy <= 2; dy++) {
 			for (LONG dx = -2; dx <= 2; dx++) {
-				COLORREF color = GetPixel(cachedDesktopDC, x + dx, y + dy);
-				if (color == CLR_INVALID) continue;
-
-				short pixelRed = static_cast<short>(GetRValue(color));
-				short pixelGreen = static_cast<short>(GetGValue(color));
-				short pixelBlue = static_cast<short>(GetBValue(color));
-				if (pixelIsBorderColor(pixelRed, pixelGreen, pixelBlue)) {
+				if (freshBorderPixelExact(x + dx, y + dy)) {
 					return true;
 				}
 			}
@@ -46,22 +49,46 @@ set(PATCHED_TRACKING_STATE [=[
 		LONG bottomCenterX = bottomLeft.x +
 			(bottomRight.x - bottomLeft.x) / 2;
 
-		// The known border itself must still exist.
 		if (!freshBorderPixelNear(bottomLeft.x, bottomLeft.y) ||
-			!freshBorderPixelNear(bottomCenterX, bottomLeft.y) ||
-			!freshBorderPixelNear(bottomRight.x, bottomRight.y) ||
-			!freshBorderPixelNear(topLeft.x, topLeft.y)) {
+			!freshBorderPixelNear(bottomCenterX, bottomLeft.y)) {
 			return false;
 		}
 
-		// Detect a materially larger rectangle too. Merely checking the old
-		// right/top points is insufficient because those points would still lie
-		// on a longer border. Probe just beyond the configured size tolerance.
-		bool extendsRight = freshBorderPixelNear(
+		// The original coarse-to-fine geometry search can finish a few pixels
+		// inside the exact corner. Accept that known precision instead of treating
+		// a 1-5 px difference as a different Tarkov tooltip.
+		bool rightEdgeOk = false;
+		for (LONG dx = -trackedWidthTolerance;
+			dx <= trackedWidthTolerance && !rightEdgeOk;
+			dx++) {
+			rightEdgeOk = freshBorderPixelExact(
+				bottomRight.x + dx,
+				bottomRight.y
+			);
+		}
+
+		bool topEdgeOk = false;
+		for (LONG dy = -trackedHeightTolerance;
+			dy <= trackedHeightTolerance && !topEdgeOk;
+			dy++) {
+			topEdgeOk = freshBorderPixelExact(
+				topLeft.x,
+				topLeft.y + dy
+			);
+		}
+
+		if (!rightEdgeOk || !topEdgeOk) {
+			return false;
+		}
+
+		// Detect a materially larger rectangle too. Use exact probes here (not a
+		// neighborhood), otherwise the probe could accidentally reach back onto
+		// the old border and invalidate a perfectly good first OCR result.
+		bool extendsRight = freshBorderPixelExact(
 			bottomRight.x + trackedWidthTolerance + 1,
 			bottomRight.y
 		);
-		bool extendsUp = freshBorderPixelNear(
+		bool extendsUp = freshBorderPixelExact(
 			topLeft.x,
 			topLeft.y - trackedHeightTolerance - 1
 		);
@@ -302,7 +329,7 @@ set(PATCHED_OCR_SUCCESS [=[
 								mousePos.x << "," << mousePos.y << endl;
 ]=])
 string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_OCR_SUCCESS}" TRACKING_SUCCESS_POS)
-if(TRACKING_SUCCESS_POS EQUAL -1)
+if(OCR_SUCCESS_TRACKING_POS EQUAL -1)
   message(FATAL_ERROR "Expected OCR success block was not found for tooltip tracking")
 endif()
 string(REPLACE "${ORIGINAL_OCR_SUCCESS}" "${PATCHED_OCR_SUCCESS}"
