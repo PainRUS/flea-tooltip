@@ -42,21 +42,23 @@ export default function PriceUpdateStatus() {
               : null,
           priceUpdateFailed: config.priceUpdateFailed ?? false,
         });
-        setNow(Date.now());
       } catch (error) {
         console.error("Failed to read price update status:", error);
       }
     };
 
     void refreshStatus();
-    const timer = setInterval(() => {
-      setNow(Date.now());
+    const statusTimer = setInterval(() => {
       void refreshStatus();
+    }, 5000);
+    const clockTimer = setInterval(() => {
+      setNow(Date.now());
     }, 1000);
 
     return () => {
       disposed = true;
-      clearInterval(timer);
+      clearInterval(statusTimer);
+      clearInterval(clockTimer);
     };
   }, []);
 
@@ -69,13 +71,31 @@ export default function PriceUpdateStatus() {
     status.lastPriceUpdateAt !== null &&
     now - status.lastPriceUpdateAt >= PRICE_MAX_AGE_MS;
   const failed = status.priceUpdateFailed || expired;
+  const formatTime = (timestamp: number) =>
+    new Intl.DateTimeFormat(isRussian ? "ru-RU" : "en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(new Date(timestamp));
 
   if (failed) {
     return (
-      <div className="shrink-0 px-2 py-1 text-center text-xs font-bold bg-red-100 text-red-800 border-b border-red-300">
-        {isRussian
-          ? "Не удалось обновить цены. Актуальные данные недоступны."
-          : "Failed to update prices. Current price data is unavailable."}
+      <div className="absolute inset-0 z-50 flex flex-col items-center justify-center px-6 text-center bg-white text-red-800">
+        <div className="text-base font-bold mb-1">
+          {isRussian ? "Не удалось обновить цены" : "Failed to update prices"}
+        </div>
+        <div className="text-sm">
+          {isRussian
+            ? "Актуальные данные о ценах недоступны."
+            : "Current price data is unavailable."}
+        </div>
+        {status.lastPriceUpdateAt && (
+          <div className="text-xs mt-2 text-stone-600">
+            {isRussian
+              ? `Последнее успешное обновление: ${formatTime(status.lastPriceUpdateAt)}`
+              : `Last successful update: ${formatTime(status.lastPriceUpdateAt)}`}
+          </div>
+        )}
       </div>
     );
   }
@@ -84,12 +104,7 @@ export default function PriceUpdateStatus() {
     return null;
   }
 
-  const lastUpdated = new Intl.DateTimeFormat(isRussian ? "ru-RU" : "en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(status.lastPriceUpdateAt));
-
+  const lastUpdated = formatTime(status.lastPriceUpdateAt);
   const countdown = status.nextPriceUpdateAt
     ? formatCountdown(status.nextPriceUpdateAt - now)
     : "--:--";
