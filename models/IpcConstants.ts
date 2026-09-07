@@ -30,4 +30,5 @@ export default class IpcConstants {
   static ToggleIncrementLastItem = "toggle-increment-last-item";
   static ToggleScreenCalibration = "toggle-screen-calibration";
   static TooltipConfigChanged = "tooltip-config-changed";
+  static TooltipPositionChanged = "tooltip-position-changed";
 }
