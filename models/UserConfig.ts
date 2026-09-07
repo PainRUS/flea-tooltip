@@ -25,4 +25,6 @@ export type UserConfig = {
   usePveMode?: boolean;
   showTotalPrice?: boolean;
   language?: AppLanguage;
+  ocrDebugMode?: boolean;
+  ocrDebugStepDelay?: number; // 100-2000 ms
 };
