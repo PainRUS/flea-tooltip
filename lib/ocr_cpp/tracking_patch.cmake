@@ -239,7 +239,7 @@ set(PATCHED_MOUSE_MOVED_BLOCK [=[
 							};
 							candidateTopLeft = {
 								translatedTopLeft.x + clampShiftX,
-								translatedTopLeft.y + cursorDeltaY + clampShiftY
+								translatedTopLeft.y + clampShiftY
 							};
 							trackedVisible = trackedRectSameGeometry(
 								candidateBottomLeft,
