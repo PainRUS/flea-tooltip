@@ -18,12 +18,16 @@ export default class TooltipWindow extends BrowserWindow {
       backgroundColor: "#00000000",
       skipTaskbar: true,
       resizable: false,
+      // The price popup is an in-game overlay and must stay above Tarkov
+      // independently of the main-window "Always on top" preference.
+      alwaysOnTop: true,
       webPreferences: {
         preload: TOOLTIP_WINDOW_PRELOAD_WEBPACK_ENTRY,
       },
     });
 
     this.loadURL(TOOLTIP_WINDOW_WEBPACK_ENTRY);
+    this.setAlwaysOnTop(true, "screen-saver");
   }
 
   public hideTooltip(): void {
@@ -63,7 +67,13 @@ export default class TooltipWindow extends BrowserWindow {
       width: initialWidth,
       height: initialHeight,
     });
+
+    // Do not tie overlay visibility to the main application's top-most mode.
+    // Reassert the z-order before every show because games can change their
+    // own window z-order while switching menus/fullscreen states.
+    this.setAlwaysOnTop(true, "screen-saver");
     this.showInactive();
+    this.moveTop();
 
     // React receives the item just before this call. Give it a moment to paint,
     // then shrink the transparent window to the actual white price card and
@@ -155,6 +165,7 @@ export default class TooltipWindow extends BrowserWindow {
         width: tooltipWidth,
         height: tooltipHeight,
       });
+      this.moveTop();
     } catch (error) {
       // The already-visible, clamped 500x500 fallback remains on screen.
       console.error("Failed to fit tooltip to screen:", error);
