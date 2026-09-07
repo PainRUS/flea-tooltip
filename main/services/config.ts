@@ -54,6 +54,7 @@ function createUserConfigFile(userDataPath: string): void {
     enableScreenCalibration: true,
     usePveMode: false,
     showTotalPrice: false,
+    language: "en",
   };
 
   fs.writeFileSync(
