@@ -62,7 +62,7 @@ export default function PriceColorSettings() {
   );
 
   const formatPrice = (value: number) =>
-    numberWithCommas(Math.round(value))?.replace(/,/g, " ") ?? "0";
+    String(numberWithCommas(Math.round(value)) ?? "0").replace(/,/g, " ");
 
   const describeBand = (index: number): string => {
     const values = normalizedPreviewThresholds;
