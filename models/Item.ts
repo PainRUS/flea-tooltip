@@ -5,6 +5,7 @@ export default class Item {
   searchName: string;
   searchShortName: string;
   availableOnFleaMarket: boolean;
+  fleaMarketMinLevel?: number;
   prices: ItemPrices;
   slots: number;
   tasks: ItemTask[];
@@ -38,6 +39,7 @@ export class ClientItem extends Item {
   constructor(item: Item) {
     super();
     this.availableOnFleaMarket = item.availableOnFleaMarket;
+    this.fleaMarketMinLevel = item.fleaMarketMinLevel;
     this.id = item.id;
     this.name = item.name;
     this.prices = item.prices;
