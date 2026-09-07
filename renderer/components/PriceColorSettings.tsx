@@ -119,7 +119,12 @@ export default function PriceColorSettings() {
     setEnabled(true);
     setThresholds(next.thresholds);
     setColors(next.colors);
-    setMessage(t("Defaults loaded — press Save", "Загружены значения по умолчанию — нажмите Сохранить"));
+    setMessage(
+      t(
+        "Defaults loaded — press Save",
+        "Загружены значения по умолчанию — нажмите Сохранить"
+      )
+    );
   };
 
   return (
@@ -218,8 +223,11 @@ export default function PriceColorSettings() {
                       className="grid grid-cols-[1fr_42px_100px] items-center gap-2 rounded bg-stone-700/50 px-2 py-2"
                     >
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold" style={{ color: safeColor }}>
-                          ₽ {describeBand(index)}
+                        <div
+                          className="text-sm font-semibold"
+                          style={{ color: safeColor }}
+                        >
+                          {describeBand(index)}
                         </div>
                         <div className="text-[10px] text-stone-400">
                           {t(`Band ${index + 1}`, `Диапазон ${index + 1}`)}
