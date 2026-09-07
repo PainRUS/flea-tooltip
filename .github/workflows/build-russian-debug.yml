@@ -1,13 +1,13 @@
 name: Build Russian OCR Debug
 
 on:
-  push:
-    branches:
-      - feature/russian-ui-ocr-debug
   pull_request:
     branches:
       - main
   workflow_dispatch:
+
+env:
+  OCR_DEPS_CACHE_VERSION: v1
 
 jobs:
   typescript:
@@ -52,10 +52,35 @@ jobs:
           }
           "root=$root" >> $env:GITHUB_OUTPUT
 
-      - name: Install Tesseract
+      # Tesseract and its dependency tree take ~20 minutes to build from source
+      # on a clean runner. Cache the complete installed x64 tree once; normal
+      # OCR changes then compile only our small ocr_cpp.exe.
+      - name: Restore prebuilt Tesseract dependencies
+        id: ocr-deps-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
+            ${{ steps.vcpkg.outputs.root }}\installed\vcpkg
+          key: flea-tooltip-ocr-deps-${{ runner.os }}-x64-${{ env.OCR_DEPS_CACHE_VERSION }}
+
+      - name: Ensure Tesseract development dependencies
         shell: pwsh
         run: |
-          & "${{ steps.vcpkg.outputs.root }}\vcpkg.exe" install tesseract:x64-windows
+          $root = "${{ steps.vcpkg.outputs.root }}"
+          $config = "$root\installed\x64-windows\share\tesseract\TesseractConfig.cmake"
+          $header = "$root\installed\x64-windows\include\tesseract\baseapi.h"
+
+          if ((Test-Path $config) -and (Test-Path $header)) {
+            Write-Host "Using cached prebuilt Tesseract development dependencies."
+            exit 0
+          }
+
+          Write-Host "OCR dependency cache is empty; seeding it once with vcpkg."
+          & "$root\vcpkg.exe" install tesseract:x64-windows
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg failed with exit code $LASTEXITCODE"
+          }
 
       - name: Configure OCR build
         shell: pwsh
@@ -66,7 +91,7 @@ jobs:
             -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="${{ steps.vcpkg.outputs.root }}\scripts\buildsystems\vcpkg.cmake"
 
-      - name: Build OCR
+      - name: Build OCR executable
         shell: pwsh
         run: cmake --build build/ocr --config Release --parallel
 
