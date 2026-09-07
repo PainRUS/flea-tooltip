@@ -59,6 +59,55 @@ endif()
 string(REPLACE "${ORIGINAL_TRACKING_STATE}" "${PATCHED_TRACKING_STATE}"
   OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
 
+# A very quick move can end after only one or two failed moving checks. Keep
+# validating the cached border while the cursor is stationary so a tooltip that
+# disappeared during that move is always released and the normal OCR path can
+# run on the new stopped position.
+set(ORIGINAL_STATIONARY_BLOCK [=[
+			if (
+				lastValidMousePos.x == mousePos.x &&
+				lastValidMousePos.y == mousePos.y
+			) {
+				mouseStationaryCount++;
+				sleepInterval = 25;
+			}
+]=])
+set(PATCHED_STATIONARY_BLOCK [=[
+			if (
+				lastValidMousePos.x == mousePos.x &&
+				lastValidMousePos.y == mousePos.y
+			) {
+				mouseStationaryCount++;
+				sleepInterval = 25;
+
+				if (trackingTooltip) {
+					if (trackedRectStillVisible(
+						trackedBottomLeft,
+						trackedBottomRight,
+						trackedTopLeft
+					)) {
+						trackedMissCount = 0;
+					}
+					else if (++trackedMissCount >= trackedMissLimit) {
+						trackingTooltip = false;
+						trackedMissCount = 0;
+						foundTooltip = false;
+						showedMouseMoved = false;
+						cachedPixelBuffer.pixels.clear();
+						lastScannedCursor = { 0, 0 };
+						cout << "TOOLTIP_LOST" << endl;
+						fflush(stdout);
+					}
+				}
+			}
+]=])
+string(FIND "${OCR_SOURCE_CONTENT}" "${ORIGINAL_STATIONARY_BLOCK}" TRACKING_STATIONARY_POS)
+if(TRACKING_STATIONARY_POS EQUAL -1)
+  message(FATAL_ERROR "Expected OCR stationary block was not found")
+endif()
+string(REPLACE "${ORIGINAL_STATIONARY_BLOCK}" "${PATCHED_STATIONARY_BLOCK}"
+  OCR_SOURCE_CONTENT "${OCR_SOURCE_CONTENT}")
+
 set(ORIGINAL_MOUSE_MOVED_BLOCK [=[
 			else {
 				if (!showedMouseMoved) {
