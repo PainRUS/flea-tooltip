@@ -19,9 +19,11 @@ const russianText: Record<string, string> = {
     "ПЕРЕЗАПУСТИТЕ ПРИЛОЖЕНИЕ, ЧТОБЫ ПРИМЕНИТЬ ИЗМЕНЕНИЯ",
   "If you are still running into issues, please join our Discord for help.":
     "Если проблема остаётся, обратитесь за помощью в сообщество проекта.",
+  "Most Recent Item": "Последний предмет",
   Total: "Итого",
   per: "за слот",
   "Unavailable on Flea": "Недоступно на барахолке",
+  "N/A": "Н/Д",
 };
 
 function translateTextNode(node: Text): void {
