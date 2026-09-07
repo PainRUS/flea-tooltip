@@ -6,6 +6,8 @@ declare const TOOLTIP_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 export default class TooltipWindow extends BrowserWindow {
   private layoutGeneration = 0;
   private readonly cursorGap = 13;
+  private lastCursorX = 0;
+  private lastCursorY = 0;
 
   constructor() {
     super({
@@ -38,6 +40,8 @@ export default class TooltipWindow extends BrowserWindow {
   }
 
   public showNearCursor(cursorX: number, cursorY: number): void {
+    this.lastCursorX = cursorX;
+    this.lastCursorY = cursorY;
     const generation = ++this.layoutGeneration;
     const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
     const bounds = display.bounds;
@@ -77,15 +81,72 @@ export default class TooltipWindow extends BrowserWindow {
 
     // React receives the item just before this call. Give it a moment to paint,
     // then shrink the transparent window to the actual white price card and
-    // flip the card around the cursor if an edge would otherwise be crossed.
+    // flip the card around the latest cursor position if an edge would
+    // otherwise be crossed.
     setTimeout(() => {
-      void this.fitRenderedTooltipToScreen(cursorX, cursorY, generation);
+      void this.fitRenderedTooltipToScreen(generation);
     }, 40);
   }
 
-  private async fitRenderedTooltipToScreen(
+  // Tracking an already-recognized Tarkov tooltip should be extremely cheap.
+  // Reuse the current rendered price-card dimensions and only move the native
+  // BrowserWindow; do not re-measure React or recreate the tooltip on every
+  // mouse pixel.
+  public moveNearCursor(cursorX: number, cursorY: number): void {
+    if (this.isDestroyed()) {
+      return;
+    }
+
+    this.lastCursorX = cursorX;
+    this.lastCursorY = cursorY;
+
+    const currentBounds = this.getBounds();
+    const { x, y } = this.getPositionNearCursor(
+      cursorX,
+      cursorY,
+      currentBounds.width,
+      currentBounds.height
+    );
+
+    this.setPosition(x, y, false);
+    this.setAlwaysOnTop(true, "screen-saver");
+    if (!this.isVisible()) {
+      this.showInactive();
+    }
+    this.moveTop();
+  }
+
+  private getPositionNearCursor(
     cursorX: number,
     cursorY: number,
+    tooltipWidth: number,
+    tooltipHeight: number
+  ): { x: number; y: number } {
+    const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
+    const bounds = display.bounds;
+    const rightEdge = bounds.x + bounds.width;
+    const bottomEdge = bounds.y + bounds.height;
+
+    const safeWidth = Math.max(1, Math.min(tooltipWidth, bounds.width));
+    const safeHeight = Math.max(1, Math.min(tooltipHeight, bounds.height));
+
+    let x = cursorX + this.cursorGap;
+    let y = cursorY + this.cursorGap;
+
+    if (x + safeWidth > rightEdge) {
+      x = cursorX - this.cursorGap - safeWidth;
+    }
+    if (y + safeHeight > bottomEdge) {
+      y = cursorY - this.cursorGap - safeHeight;
+    }
+
+    x = Math.max(bounds.x, Math.min(x, rightEdge - safeWidth));
+    y = Math.max(bounds.y, Math.min(y, bottomEdge - safeHeight));
+
+    return { x, y };
+  }
+
+  private async fitRenderedTooltipToScreen(
     generation: number
   ): Promise<void> {
     if (
@@ -129,10 +190,10 @@ export default class TooltipWindow extends BrowserWindow {
         return;
       }
 
+      const cursorX = this.lastCursorX;
+      const cursorY = this.lastCursorY;
       const display = screen.getDisplayNearestPoint({ x: cursorX, y: cursorY });
       const bounds = display.bounds;
-      const rightEdge = bounds.x + bounds.width;
-      const bottomEdge = bounds.y + bounds.height;
       const tooltipWidth = Math.max(
         1,
         Math.min(Math.ceil(measured.width) + 2, bounds.width)
@@ -141,19 +202,12 @@ export default class TooltipWindow extends BrowserWindow {
         1,
         Math.min(Math.ceil(measured.height) + 2, bounds.height)
       );
-
-      let x = cursorX + this.cursorGap;
-      let y = cursorY + this.cursorGap;
-
-      if (x + tooltipWidth > rightEdge) {
-        x = cursorX - this.cursorGap - tooltipWidth;
-      }
-      if (y + tooltipHeight > bottomEdge) {
-        y = cursorY - this.cursorGap - tooltipHeight;
-      }
-
-      x = Math.max(bounds.x, Math.min(x, rightEdge - tooltipWidth));
-      y = Math.max(bounds.y, Math.min(y, bottomEdge - tooltipHeight));
+      const { x, y } = this.getPositionNearCursor(
+        cursorX,
+        cursorY,
+        tooltipWidth,
+        tooltipHeight
+      );
 
       if (generation !== this.layoutGeneration || this.isDestroyed()) {
         return;
