@@ -1,11 +1,7 @@
 import Item, { ItemTask } from "./Item";
 import MiniSearch, { SearchResult } from "minisearch";
 import TarkovMarketItem from "./TarkovMarketItem";
-import { Form } from "react-router-dom/dist";
-import fs from "fs";
-import path from "path";
-import { app } from "electron";
-import { isDev } from "../utils";
+import { AppLanguage } from "./UserConfig";
 
 export default class Items {
   items: Item[];
@@ -15,14 +11,20 @@ export default class Items {
     this.items = [];
   }
 
-  async fetchItems(apiKey?: string, usePveMode?: boolean): Promise<void> {
+  async fetchItems(
+    apiKey?: string,
+    usePveMode?: boolean,
+    language: AppLanguage = "en"
+  ): Promise<void> {
     const tarkovMarketApiKey = apiKey || "";
 
     // Clear existing items when refetching
     this.items = [];
 
     try {
-      if (tarkovMarketApiKey.trim() !== "") {
+      // Tarkov Market returns English names. In Russian mode use Tarkov.dev so
+      // OCR/search names and UI names always match the selected game language.
+      if (tarkovMarketApiKey.trim() !== "" && language === "en") {
         console.log("Using Tarkov Market API key for item fetch");
 
         const tarkovMarketUrl = usePveMode
@@ -38,7 +40,7 @@ export default class Items {
           },
         });
 
-        if (!(res.status == 200 || res.status == 204)) {
+        if (!(res.status === 200 || res.status === 204)) {
           throw new Error("Failed to fetch items");
         }
 
@@ -48,6 +50,8 @@ export default class Items {
             id: item.uid,
             name: item.name,
             shortName: item.shortName,
+            searchName: item.name,
+            searchShortName: item.shortName,
             availableOnFleaMarket: !item.bannedOnFlea,
             slots: item.slots,
             prices: {
@@ -66,23 +70,33 @@ export default class Items {
 
         this.items = formattedData;
       } else {
-        console.log("No API key provided, fetching items from Tarkov.dev JSON API");
-        const itemsFromApi = await this.getItemsPromise(usePveMode);
+        if (tarkovMarketApiKey.trim() !== "" && language === "ru") {
+          console.log(
+            "Russian language selected; using Tarkov.dev JSON API for localized item names"
+          );
+        } else {
+          console.log(
+            "No API key provided, fetching items from Tarkov.dev JSON API"
+          );
+        }
+
+        const itemsFromApi = await this.getItemsPromise(usePveMode, language);
         console.log(itemsFromApi.length + " items fetched from API");
         this.items = itemsFromApi;
       }
     } catch (error) {
       console.error("Failed to fetch items:", error);
 
-      // If we don't have an API key, Tarkov.dev was already attempted above.
-      if (tarkovMarketApiKey.trim() === "") {
+      // Tarkov.dev was already attempted if no key is available or Russian
+      // language is selected.
+      if (tarkovMarketApiKey.trim() === "" || language === "ru") {
         throw new Error("Failed to fetch items from API");
       }
 
       // Try Tarkov.dev as fallback when Tarkov Market API fails.
       try {
         console.log("Falling back to Tarkov.dev JSON API");
-        const itemsFromApi = await this.getItemsPromise(usePveMode);
+        const itemsFromApi = await this.getItemsPromise(usePveMode, language);
         console.log(itemsFromApi.length + " items fetched from API");
         this.items = itemsFromApi;
       } catch (fallbackError) {
@@ -95,15 +109,18 @@ export default class Items {
     }
   }
 
-  async getItemsPromise(usePveMode?: boolean): Promise<Item[]> {
+  async getItemsPromise(
+    usePveMode?: boolean,
+    language: AppLanguage = "en"
+  ): Promise<Item[]> {
     const gameMode = usePveMode ? "pve" : "regular";
     const baseUrl = `https://json.tarkov.dev/${gameMode}`;
 
-    const [itemsResponse, translationsResponse] = await Promise.all([
+    const [itemsResponse, selectedTranslationsResponse] = await Promise.all([
       fetch(`${baseUrl}/items`, {
         headers: { Accept: "application/json" },
       }),
-      fetch(`${baseUrl}/items_en`, {
+      fetch(`${baseUrl}/items_${language}`, {
         headers: { Accept: "application/json" },
       }),
     ]);
@@ -114,20 +131,38 @@ export default class Items {
       );
     }
 
-    if (!translationsResponse.ok) {
+    if (!selectedTranslationsResponse.ok) {
       throw new Error(
-        `Tarkov.dev translations request failed with status ${translationsResponse.status}`
+        `Tarkov.dev ${language} translations request failed with status ${selectedTranslationsResponse.status}`
       );
     }
 
     const itemsPayload: any = await itemsResponse.json();
-    const translationsPayload: any = await translationsResponse.json();
+    const selectedTranslationsPayload: any =
+      await selectedTranslationsResponse.json();
 
     if (!itemsPayload?.data?.items) {
       throw new Error("Unexpected Tarkov.dev items response");
     }
 
-    const itemTranslations = translationsPayload?.data || {};
+    let englishTranslationsPayload = selectedTranslationsPayload;
+    if (language !== "en") {
+      const englishTranslationsResponse = await fetch(`${baseUrl}/items_en`, {
+        headers: { Accept: "application/json" },
+      });
+
+      if (!englishTranslationsResponse.ok) {
+        throw new Error(
+          `Tarkov.dev English translations request failed with status ${englishTranslationsResponse.status}`
+        );
+      }
+
+      englishTranslationsPayload = await englishTranslationsResponse.json();
+    }
+
+    const selectedTranslations = selectedTranslationsPayload?.data || {};
+    const englishTranslations = englishTranslationsPayload?.data || {};
+
     const translate = (value: any, translations: any): string => {
       if (typeof value !== "string") {
         return "";
@@ -145,7 +180,7 @@ export default class Items {
         fetch(`${baseUrl}/traders`, {
           headers: { Accept: "application/json" },
         }),
-        fetch(`${baseUrl}/traders_en`, {
+        fetch(`${baseUrl}/traders_${language}`, {
           headers: { Accept: "application/json" },
         }),
       ]);
@@ -186,7 +221,8 @@ export default class Items {
       const trader = traderPrices
         .map((price: any) => {
           return {
-            name: traderNames[price.trader] || "Trader",
+            name: traderNames[price.trader] ||
+              (language === "ru" ? "Торговец" : "Trader"),
             price:
               typeof price.priceRUB === "number"
                 ? price.priceRUB
@@ -198,14 +234,24 @@ export default class Items {
         .sort(
           (a: { price: number }, b: { price: number }) => b.price - a.price
         )[0] || {
-        name: "N/A",
+        name: language === "ru" ? "Н/Д" : "N/A",
         price: 0,
       };
 
+      const canonicalName = translate(item.name, englishTranslations);
+      const selectedName = translate(item.name, selectedTranslations);
+      const selectedShortName = translate(item.shortName, selectedTranslations);
+
       return {
         id: item.id,
-        name: translate(item.name, itemTranslations),
-        shortName: translate(item.shortName, itemTranslations),
+        // Keep the canonical English full name for existing task matching.
+        name: canonicalName,
+        // shortName is displayed in the UI and therefore follows the selected language.
+        shortName: selectedShortName,
+        // OCR/search fields follow exactly one selected language; there is no
+        // automatic mixed-language matching.
+        searchName: selectedName,
+        searchShortName: selectedShortName,
         availableOnFleaMarket:
           !types.includes("noFlea") &&
           (lastLowPrice > 0 || avg24hPrice > 0),
@@ -234,12 +280,12 @@ export default class Items {
     }
 
     this.searchIndex = new MiniSearch({
-      fields: ["name", "shortName"], // fields to index for full-text search
+      fields: ["searchName", "searchShortName"],
       searchOptions: {
         fuzzy: 0.2,
         prefix: true,
         boost: {
-          shortName: 1.5,
+          searchShortName: 1.5,
         },
       },
     });
@@ -258,11 +304,11 @@ export default class Items {
     const item = this.getItemById(topResult.id);
 
     console.log(
-      `Search for "${searchQuery}" returned top result: "${item.name}" with score ${topResult.score} with a max score of ${lowestAcceptableScore}`
+      `Search for "${searchQuery}" returned top result: "${item.searchName}" with score ${topResult.score} with a max score of ${lowestAcceptableScore}`
     );
     if (
       topResult.score <= lowestAcceptableScore &&
-      searchQuery.trim().toLowerCase() !== item.name.trim().toLowerCase()
+      searchQuery.trim().toLowerCase() !== item.searchName.trim().toLowerCase()
     ) {
       return null;
     }
@@ -287,10 +333,6 @@ export default class Items {
   }
 
   itemsAreLoaded(): boolean {
-    if (!this.items || this.items.length === 0) {
-      return false;
-    }
-
-    return true;
+    return !!this.items && this.items.length > 0;
   }
 }
