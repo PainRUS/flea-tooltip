@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { Tooltip } from "../pages/Tooltip";
 import UiTranslator from "../components/UiTranslator";
 import TooltipPriceColors from "../components/TooltipPriceColors";
+import QuestTooltipVisibility from "../components/QuestTooltipVisibility";
 import "../styles/index.css";
 import React from "react";
 
@@ -63,6 +64,7 @@ root.render(
   <>
     <UiTranslator />
     <TooltipPriceColors />
+    <QuestTooltipVisibility />
     <TooltipCardLayer />
   </>
 );
