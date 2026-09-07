@@ -59,16 +59,3 @@
 .draggable {
   -webkit-app-region: drag;
 }
-
-/* NumberFlow calculates each digit position from the font metrics. The
-   inherited tracking-wider used by the total-price block makes those animated
-   slots overlap in Electron. Keep the animation, but use stable equal-width
-   digits and normal character spacing for the number itself. */
-number-flow-react {
-  display: inline-block;
-  white-space: nowrap;
-  letter-spacing: normal;
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum" 1;
-  line-height: 1;
-}
